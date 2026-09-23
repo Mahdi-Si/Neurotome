@@ -103,15 +103,61 @@ progress fill is `Highlight`. Separators remain 1 px borders.
 - **Flag badge**: in NaN/Inf mode a flagged node gets a 1.5 px `negative` outline and a mono `NAN/INF` tag in
   `negative-text`. This is the only place `negative` appears on graph nodes.
 - **Canvas focus ring**: `.graph-canvas:focus-visible` draws a 1.5 px `accent` outline inset by 2 px (keyboard only).
-- **Patch Δ legend**: the colour-mode legend for activation patching reads
-  `Patch Δ = ‖after − before‖ / ‖before‖ · <path> → <baseline>`, lo `0`, hi the largest relative change (`pct`). Tints
-  are normalised by the largest change outside the patched node; the patched node itself is full `accent` with the
-  readout `patched · <baseline>`, other nodes read `‖Δ‖ <value> · rel <pct>`, and nodes without a value read `‖Δ‖ —`.
+- **Intervention Δ legend**: the `Intervention Δ` colour mode (disabled, title `Run an intervention first`, until
+  an intervention is open) reads `Intervention Δ = ‖after − before‖ / ‖before‖ · <name>`, lo `0`, hi the largest
+  relative change (`pct`). Tints are normalised by the largest change among downstream nodes that were not edited;
+  edited nodes are full `accent` with the readout `edited · <labels of the edits on that op>`; nodes that are not
+  downstream are `v 0` (`unchanged · not downstream`); downstream nodes read
+  `‖Δ‖ <l2> · rel <pct> · cos <0.000 | —> · max|Δ| <value>`, and downstream nodes without a row read `‖Δ‖ —`.
+- **Intervention banner**: while an intervention is open (URL `iv`) the Graph, Tensor and Trace views show a 32 px
+  `panel` row with a 1 px `line` bottom border under the capture banner: a `.lbl pill` `Intervened`, a `.lbl dim`
+  line `<name> · <n> edits · Δ logit <±0.00> · <saved>/<downstream> downstream tensors saved` (+ `· budget reached`;
+  the Trace view adds `· attribution runs on the clean pass`) with the Δ in the Δ colour, and on the right a
+  `.chart-export` link `Clean` (aria-label `Show the clean run`) that drops `iv` (and `color=iv`). An unknown hash
+  shows the server's message in `.err` in the same row. The TopBar tab links carry `iv` (not to Lens) and the draft
+  `set` (to Graph and Interventions only).
+- **Δ colour**: a Δ logit or Δ prob ≥ 0 is `accent` (the edit supports the target), < 0 is `negative-text` (it
+  hurts it); the sign is always printed too (`+0.12` / `−3.21`).
+- **Intervene section**: the inspector section after `From` / `Feeds` (every backend): `.lbl`
+  `Intervene · this node's output` with a `Clear set` text button on the right while a draft exists; with an open
+  intervention, kv rows `‖Δ‖`, `Rel Δ`, `Cosine`, `Max |Δ|` for the node (or `Edited · <labels>`, or `Unchanged`)
+  and a `Clean vs intervened →` link (a dim reason instead when its tensor was not saved); the edit form; a dim
+  `<n> edits in set` line with `Open in Interventions →`; a `.btn solid` `Run set (n)`; job progress and errors.
+  Input, output and non-float nodes show a dim note instead of the form.
+- **Edit form**: `.seg lbl` groups and `.field` inputs, top to bottom: `Edit kind` (`Zero` `Mean` `Resample`
+  `Constant` `Scale` `Steer`); per kind `Over` (`Positions` / `Runs`), `Source run` (`Random run` first; runs with
+  the same model spec and weights, this one marked `· this run`) and `Seed`, `Value`, `Alpha`, `Direction`
+  (`Contrast`: `Run A`, `Run B`, `Pool` for token tensors; `Channel`: `Channel`); then the scope: `Channels`
+  (placeholder `all · e.g. 0,3,7-9`, an out-of-range list shows `.err` `Channels are 0–{n-1}` and disables
+  `Add to set`), the position picker for (B, C, H, W) or `Positions` (`All` / `Last` / `Selected`) with token
+  selection for (B, T, D); a `.btn` `Add to set` closes it. Draft edits read like the server's labels:
+  `<Kind> · <path> · <scope>` (`Scale ×2 · block.relu · ch 0–3`).
+- **Interventions tab**: the TopBar tabs read `Graph · Tensors · Trace · Lens · Interventions`; `Run interventions`
+  is the TopBar button. A 300 px left aside lists the saved interventions (`.lbl` `Saved` + count; each row the
+  name as a button, `aria-pressed` when open, a dim `<n> edits · Δ logit` line in the Δ colour, `Rename` (the name
+  becomes a `.field`; Enter saves, Escape cancels) and `Delete` → `Confirm delete` text buttons); empty:
+  `No saved interventions · run a set to save one`. The main area stacks the **Set** card (`Target` select, one row
+  per edit with a `×` remove button, `Clear set`), the **Add edit** card (`Node` select, then the edit form) and the
+  **Result** region: `Result · <name>` with the dim method label, kv `Target`, `Logit before → after (Δ)` and
+  `Prob` in the Δ colour, top-k before / after as two columns of `label · p` rows with a 4 px `ink` bar ∝ p (the
+  target's label in `accent`; hover readout `before #2 "cat" 0.12 → after #1 0.41`), the edit labels, a truncation
+  note, and the links `Graph · Intervention Δ →` and `Clean vs intervened →`.
+- **Continuations**: for a causal LM the tab's Generation card has a number `Tokens` (1–64, default 16) and
+  `Generate` with job progress, then two columns (`Clean continuation`, `Intervened continuation`): the prompt
+  tokens dim, the generated tokens as mono spans with visible whitespace; from the first diverging step on, tokens
+  carry a 1 px `ink` underline. Hover or focus on a step prints its top-3 per side as the readout line. Below, a
+  table `Per-step top tokens` (`Step · Clean · p · Intervened · p`, top-1 per side) with rows from the divergence on
+  in `accent-soft`.
+- **Clean vs intervened**: with an open intervention the Tensor view's left rail gets a `.btn`
+  `Clean vs intervened` (`aria-pressed`) beside `Compare`; it opens the compare layout with `A · clean` and
+  `B · intervened` of the selected node on a shared scale, and `Δ = B − A` statistics. Plain compare with an open
+  intervention compares two nodes both under it.
 - **Job progress**: a 4 px `line-soft` track with an `accent` fill at the job's progress (`.job-track`), and under it
   a mono `.lbl dim` status line (`Queued`, `42% · IG batch 3/8`, `Cancelled`) with a `Cancel` text button
   (`.chart-export` style) while the job runs. Nothing renders once the job is done; a failed job shows the server's
   message in `.err`. Used wherever a computation runs as a job (trace parameter strip, layer panel, neuron map,
-  method agreement, patch panel).
+  method agreement, intervene section, Interventions tab: intervene / generate jobs, `Clean pass` → `Intervene` →
+  `Save tensors i/N`, `Clean i/n` → `Intervened i/n`).
 - **Capture banner**: when a run's tensors were only partly saved (capture budget reached, or a module selection),
   a 32 px `panel` row with a 1 px `line` bottom border sits under the TopBar of the Graph and Tensor views: a
   `.lbl pill` tag (`Truncated` / `Selective`) and a `.lbl dim` line such as
@@ -137,7 +183,7 @@ progress fill is `Highlight`. Separators remain 1 px borders.
 - **Capture backend**: a `.field` select under the sample (`Capture backend`): `Auto`, `TorchLens · every op`,
   `NNsight · module outputs`. With `Auto` the label row carries the dim note `NNsight above 1 B params` on the right;
   the NNsight option is disabled, with `pip install 'neurotome[nnsight]'` as its title, when the server lacks it.
-- **Lens tab**: the TopBar tabs read `Graph · Tensors · Trace · Lens`. For a run whose model is not a causal LM the
+- **Lens tab**: the TopBar tabs read `Graph · Tensors · Trace · Lens · Interventions`. For a run whose model is not a causal LM the
   Lens tab is a plain `.lbl` span at 0.45 opacity with `aria-disabled="true"` and the title
   `Logit lens needs a causal language model` (not a link); opening its URL anyway shows that sentence as an `.empty`
   state with a `← Graph` link.
@@ -221,6 +267,12 @@ progress fill is `Highlight`. Separators remain 1 px borders.
   `Magnitude · unsigned` instead of `Supports / Opposes / Weak`. The hovered token gets a 1 px `ink` border and the
   readout `#3 "cat" · +0.1234 · 21% of Σ|a|`. **Exception to PNG export**: the strip has no `PNG` button; it is
   text, so copy it instead.
+- **Position picker**: the edit form's `Position picker` (an img-role dot matrix of the op's channel map) marks each
+  pooled cell with a selected pixel with a 1 px `accent` square inset 0.5 px; a click toggles every pixel of that
+  cell; a dim `<k> px selected ·` line with a `Clear` text button sits under it; the usual readout line applies.
+- **Token selection**: in selection mode (group `Token positions`) the token strip's tokens are buttons
+  (`aria-pressed`); selected tokens get an `accent-soft` ground and a 1 px `accent` border, and the readout reads
+  `#3 "cat" · selected`.
 - **Values table**: mono `.num` 11 px cells, right-aligned, `line-soft` row rules, headers `.lbl dim` sticky on
   `panel`; negative values and `nan`/`inf` in `negative-text`; at most 320 px high, scrolls both ways, with a
   `key · shape · axes` caption above and a dim truncation note when the slice was cut.

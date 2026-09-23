@@ -166,7 +166,8 @@ def test_http_objective(client):
 def test_jobs_on_cuda(tmp_path):
     mgr = RunManager(RunStore(tmp_path / "runs"), device="cuda")
     run = mgr.create_from_objects(Tiny().cuda(), torch.randn(1, 3, 16, 16))["id"]
-    for req in ({"kind": "layer", "op": "conv2d_2_3", "steps": 8}, {"kind": "patch", "op": "conv2d_3_5"}):
+    iv = {"kind": "intervene", "interventions": {"edits": [{"op": "conv2d_3_5", "kind": "zero"}]}}
+    for req in ({"kind": "layer", "op": "conv2d_2_3", "steps": 8}, iv):
         seen = follow(mgr.jobs, mgr.job(run, req).id, timeout=120)
         assert seen[-1]["status"] == "done", seen[-1]["error"]
 

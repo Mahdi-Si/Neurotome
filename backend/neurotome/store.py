@@ -9,6 +9,7 @@ Layout of one run::
       input_preview.png  the input as a picture (<= 224 px), only for image-like inputs (absent before M2)
       tensors/<op>.npy   one activation per op, float32, memory-mapped on read
       attribution/*.json cached attribution results
+      interventions/<hash>/{meta.json, tensors/<op>.npy, generate_<n>.json}   (v0.3)
 """
 
 from __future__ import annotations
@@ -90,16 +91,24 @@ class RunStore:
         return self.read_json(run_id, "ir.json")
 
     # ---- tensors ----------------------------------------------------------
-    def tensor_path(self, run_id: str, op_id: str) -> Path:
-        return self.run_dir(run_id) / "tensors" / f"{safe_name(op_id)}.npy"
+    def iv_dir(self, run_id: str, iv: str) -> Path:
+        """An intervention's folder; KeyError unless ``iv`` is a 12-hex-digit set hash."""
+        if not re.fullmatch(r"[0-9a-f]{12}", iv):
+            raise KeyError(iv)
+        return self.run_dir(run_id) / "interventions" / iv
 
-    def save_tensor(self, run_id: str, op_id: str, array: np.ndarray) -> int:
-        path = self.tensor_path(run_id, op_id)
+    def tensor_path(self, run_id: str, op_id: str, iv: str | None = None) -> Path:
+        base = self.iv_dir(run_id, iv) if iv else self.run_dir(run_id)
+        return base / "tensors" / f"{safe_name(op_id)}.npy"
+
+    def save_tensor(self, run_id: str, op_id: str, array: np.ndarray, iv: str | None = None) -> int:
+        path = self.tensor_path(run_id, op_id, iv)
+        path.parent.mkdir(parents=True, exist_ok=True)
         np.save(path, np.ascontiguousarray(array, dtype=np.float32))
         return path.stat().st_size
 
-    def load_tensor(self, run_id: str, op_id: str) -> np.ndarray:
-        path = self.tensor_path(run_id, op_id)
+    def load_tensor(self, run_id: str, op_id: str, iv: str | None = None) -> np.ndarray:
+        path = self.tensor_path(run_id, op_id, iv)
         if not path.exists():
             raise KeyError(f"No saved tensor for {op_id}")
         return np.load(path, mmap_mode="r")

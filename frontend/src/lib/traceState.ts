@@ -11,6 +11,7 @@ export interface TraceState {
   lop: string | null;           // op for the layer / neuron panel (a node's output_op)
   nc: number | null;            // neuron-conductance channel within lop
   go: boolean;                  // deep link: run once on arrival, then drop go from the URL
+  iv: string | null;            // open intervention (banner and Δ readouts; attribution stays on the clean pass)
 }
 
 const METHODS: Method[] = ["gxa", "saliency", "ig"];
@@ -31,6 +32,7 @@ export function parseTraceParams(params: URLSearchParams): TraceState {
     lop: params.get("lop") || null,
     nc: int(params.get("nc")),
     go: params.get("go") === "1",
+    iv: params.get("iv") || null,
   };
 }
 
@@ -41,7 +43,7 @@ export function traceParams(s: Partial<TraceState>): Record<string, string | nul
     node: s.node ?? null, m: s.m && s.m !== "ig" ? s.m : null, t: str(s.t),
     obj: s.obj?.op ?? null, ch: str(s.obj?.channel),
     steps: steps === 32 ? null : String(steps),
-    layer: s.layer ?? null, lop: s.lop ?? null, nc: str(s.nc), go: s.go ? "1" : null,
+    layer: s.layer ?? null, lop: s.lop ?? null, nc: str(s.nc), go: s.go ? "1" : null, iv: s.iv ?? null,
   };
 }
 

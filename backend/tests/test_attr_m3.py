@@ -1,4 +1,4 @@
-"""M3 backend: merge shares, unit objectives, layer / neuron methods, agreement, IG progress, patching."""
+"""M3 backend: merge shares, unit objectives, layer / neuron methods, agreement, IG progress."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from test_pipeline import Tiny
 from torch import nn
 
 from neurotome.attribution import _avg_ranks, agreement, channel_conductance, objective_forward
-from neurotome.capture import op_gradients, patch
+from neurotome.capture import op_gradients
 from neurotome.graph import graph_view, module_site
 from neurotome.jobs import TERMINAL
 from neurotome.models import to_logits
-from neurotome.runs import RunManager, _spatial_mean
+from neurotome.runs import RunManager
 from neurotome.store import RunStore
 
 UNIT = {"op": "relu_2_4", "channel": 3}  # Tiny: block.relu, first call
@@ -247,86 +247,8 @@ def hooked(model, module, x, value):
         handle.remove()
 
 
-def test_patch_zeros_and_mean(captured):
-    mgr, run, _ = captured
-    live = mgr.live(run)
-    model, x = live.loaded.model, live.inputs
-    op = "conv2d_3_5"  # block.conv2
-    res = mgr.patch(run, op, "zeros")
-    for up in ("conv2d_1_1", "relu_1_2", "conv2d_2_3", "relu_2_4"):
-        assert res["deltas"][up] == 0
-    assert res["rel"][op] == pytest.approx(1)
-    for down in ("add_1_6", "relu_3_7", "linear_1_10"):
-        assert res["deltas"][down] > 0
-    assert res["path"] == "block.conv2" and res["baseline"] == "zeros" and len(res["top_after"]) == 5
-    out = patch(model, x, op, torch.zeros_like)
-    ref = hooked(model, model.block.conv2, x, torch.zeros_like)
-    assert torch.allclose(out["logits_after"], ref, atol=1e-5)
-    assert res["after"]["logit"] == pytest.approx(float(ref[0, res["target"]]), abs=1e-4)
-    mean = patch(model, x, op, _spatial_mean, keep=[op])["after"][op]
-    before = torch.as_tensor(np.asarray(mgr.store.load_tensor(run, op)))
-    assert torch.allclose(mean, before.mean((2, 3), keepdim=True).expand_as(before), atol=1e-5)
-    with pytest.raises(ValueError, match="replacement shape"):
-        patch(model, x, op, lambda t: t[:, :2])
-    with pytest.raises(ValueError, match="Unknown op"):
-        mgr.patch(run, "nope", "zeros")
-
-
-def test_patch_inplace_ops(resnet):
-    """ResNet's `out += identity` and ReLU(inplace) must not leak the replayed values into their inputs."""
-    mgr, run, ir = resnet
-    live = mgr.live(run)
-    model, x = live.loaded.model, live.inputs
-    block = model.layer3[0]
-    op = next(o["id"] for o in ir["ops"] if o["modules"][-1:] == ["layer3.0.downsample.1:1"])
-    seen = {}
-    h = block.register_forward_hook(lambda _m, _i, out: seen.__setitem__("block", out.detach().clone()))
-    try:
-        hooked(model, block.downsample, x, torch.zeros_like)
-    finally:
-        h.remove()
-    out = patch(model, x, op, torch.zeros_like, keep=["relu_11_43"])
-    bn2 = next(o["id"] for o in ir["ops"] if o["modules"][-1:] == ["layer3.0.bn2:1"])
-    assert out["deltas"][bn2] == 0  # beside the patched op, not after it
-    assert "iadd_5_42" not in out["deltas"]  # its tensor is overwritten by the in-place ReLU
-    assert torch.allclose(out["after"]["relu_11_43"], seen["block"], atol=1e-5)
-
-
-def test_patch_from_run(tmp_path, monkeypatch):
-    monkeypatch.syspath_prepend(str(__import__("pathlib").Path(__file__).parent))
-    torch.manual_seed(0)
-    mgr = RunManager(RunStore(tmp_path / "runs"), max_live_models=3)
-    spec, shape = "py:test_pipeline:Tiny", [1, 3, 16, 16]
-    a = mgr.create_from_spec(spec, None, {"kind": "random", "shape": shape, "seed": 1})["id"]
-    b = mgr.create_from_spec(spec, None, {"kind": "random", "shape": shape, "seed": 2})["id"]
-    op = "relu_2_4"
-    res = finish(mgr, mgr.job(a, {"kind": "patch", "op": op, "baseline": "run", "source_run": b}))
-    assert res["status"] == "done" and res["result"]["source_run"] == b
-    live = mgr.live(a)
-    src = torch.as_tensor(np.asarray(mgr.store.load_tensor(b, op)))
-    first = []
-
-    def once(out):  # block.relu runs twice; patch only its first call
-        first.append(1)
-        return src if len(first) == 1 else None
-
-    ref = hooked(live.loaded.model, live.loaded.model.block.relu, live.inputs, once)
-    t = res["result"]["target"]
-    assert res["result"]["after"]["logit"] == pytest.approx(float(ref[0, t]), abs=1e-4)
-    again = mgr.job(a, {"kind": "patch", "op": op, "baseline": "run", "source_run": b})
-    assert again.status == "done" and again.result == res["result"]
-    other = mgr.create_from_objects(Tiny(), torch.randn(1, 3, 16, 16))["id"]
-    bad = finish(mgr, mgr.job(a, {"kind": "patch", "op": op, "baseline": "run", "source_run": other}))
-    assert bad["status"] == "error" and "same model spec" in bad["error"]
-    meta = mgr.store.meta(b)
-    meta["model"]["weights"] = "DEFAULT"  # same spec, other weights: a different network
-    mgr.store.write_json(b, "meta.json", meta)
-    with pytest.raises(ValueError, match="same model spec and weights"):
-        mgr.patch(a, "relu_3_7", "run", source_run=b)
-
-
 def test_random_weights_reload_identically():
-    """Attribution and patching reload the model from its spec; random-init weights must match the capture."""
+    """Attribution and interventions reload the model from its spec; random-init weights match the capture."""
     from neurotome.models import load_model
 
     a, b = (load_model("torchvision:resnet18").model.conv1.weight for _ in range(2))

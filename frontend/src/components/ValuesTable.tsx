@@ -12,7 +12,7 @@ const cellStyle = (v: SliceValue): React.CSSProperties => ({
 });
 const head: React.CSSProperties = { position: "sticky", background: "var(--panel)", padding: "3px 8px", textAlign: "right", fontWeight: 400 };
 
-export function ValuesTable({ runId, op, shape, initial }: { runId: string; op: string; shape: number[]; initial: string }) {
+export function ValuesTable({ runId, op, shape, initial, iv = null }: { runId: string; op: string; shape: number[]; initial: string; iv?: string | null }) {
   const [expr, setExpr] = useState(initial);
   const [res, setRes] = useState<SliceResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -23,8 +23,8 @@ export function ValuesTable({ runId, op, shape, initial }: { runId: string; op: 
     setBusy(true); setErr(null);
     p.then(ok, (e) => setErr(errText(e))).finally(() => setBusy(false));
   };
-  const show = () => run(api.slice(runId, op, expr), (r) => { setRes(r); setPage(0); });
-  const npy = () => run(api.sliceNpy(runId, op, expr), (b) => download(b, fileName([runId, op, expr], "npy")));
+  const show = () => run(api.slice(runId, op, expr, iv), (r) => { setRes(r); setPage(0); });
+  const npy = () => run(api.sliceNpy(runId, op, expr, iv), (b) => download(b, fileName([runId, iv, op, expr], "npy")));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(show, []);
 

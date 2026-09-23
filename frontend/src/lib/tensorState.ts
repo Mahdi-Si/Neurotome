@@ -1,13 +1,14 @@
 // Pure state and geometry for the tensor inspector (URL params, pooled-grid ↔ pixel, slices, compare).
 import type { Cmap, GraphView, Norm, SliceResult, SliceValue, Stats } from "./types";
 
-export interface TensorState { node: string | null; c: number | null; py: number | null; px: number | null; norm: Norm; cmap: Cmap; cmp: string | null }
+export interface TensorState { node: string | null; c: number | null; py: number | null; px: number | null; norm: Norm; cmap: Cmap; cmp: string | null;
+  iv: string | null; vs: "clean" | null }   // vs = clean vs intervened, only with iv
 
 const int = (s: string | null) => (s != null && /^\d+$/.test(s.trim()) ? Number(s) : null);
 
 export function parseTensorParams(params: URLSearchParams): TensorState {
   const py = int(params.get("py")), px = int(params.get("px"));
-  const pair = py != null && px != null;
+  const pair = py != null && px != null, iv = params.get("iv") || null;
   return {
     node: params.get("node") || null,
     c: int(params.get("c")),
@@ -16,6 +17,7 @@ export function parseTensorParams(params: URLSearchParams): TensorState {
     norm: params.get("norm") === "global" ? "global" : "channel",
     cmap: params.get("cmap") === "div" ? "div" : "seq",
     cmp: params.get("cmp") || null,
+    iv, vs: iv && params.get("vs") === "clean" ? "clean" : null,
   };
 }
 
@@ -25,6 +27,7 @@ export function tensorParams(s: TensorState): Record<string, string | null> {
     node: s.node, c: s.c == null ? null : String(s.c),
     py: pair ? String(s.py) : null, px: pair ? String(s.px) : null,
     norm: s.norm === "global" ? "global" : null, cmap: s.cmap === "div" ? "div" : null, cmp: s.cmp,
+    iv: s.iv, vs: s.iv && s.vs ? s.vs : null,
   };
 }
 

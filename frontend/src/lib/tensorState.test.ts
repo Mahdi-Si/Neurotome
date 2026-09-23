@@ -9,14 +9,14 @@ const q = (s: string) => new URLSearchParams(s);
 
 describe("tensor URL state", () => {
   it("round-trips through URL params", () => {
-    const s: TensorState = { node: "m:layer1.0:1", c: 3, py: 12, px: 40, norm: "global", cmap: "div", cmp: "relu_2_5" };
+    const s: TensorState = { node: "m:layer1.0:1", c: 3, py: 12, px: 40, norm: "global", cmap: "div", cmp: "relu_2_5", iv: "3f9a0c1d2e4b", vs: "clean" };
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(tensorParams(s))) if (v != null) p.set(k, v);
     expect(parseTensorParams(q(p.toString()))).toEqual(s);
   });
   it("omits defaults", () => {
     const s = parseTensorParams(q(""));
-    expect(s).toEqual({ node: null, c: null, py: null, px: null, norm: "channel", cmap: "seq", cmp: null });
+    expect(s).toEqual({ node: null, c: null, py: null, px: null, norm: "channel", cmap: "seq", cmp: null, iv: null, vs: null });
     expect(Object.values(tensorParams(s)).every((v) => v == null)).toBe(true);
   });
   it("falls back on bad values and drops a lone py/px", () => {
@@ -24,6 +24,13 @@ describe("tensor URL state", () => {
     expect(s).toMatchObject({ c: null, py: null, px: null, norm: "channel", cmap: "seq" });
     expect(parseTensorParams(q("c=x&px=4")).px).toBeNull();
     expect(parseTensorParams(q("py=-1&px=2")).py).toBeNull();
+  });
+  it("keeps vs only with iv", () => {
+    expect(parseTensorParams(q("vs=clean")).vs).toBeNull();
+    expect(parseTensorParams(q("iv=abc&vs=other")).vs).toBeNull();
+    expect(parseTensorParams(q("iv=abc&vs=clean"))).toMatchObject({ iv: "abc", vs: "clean" });
+    expect(tensorParams({ ...parseTensorParams(q("")), vs: "clean" }).vs).toBeNull();
+    expect(tensorParams(parseTensorParams(q("iv=abc")))).toMatchObject({ iv: "abc", vs: null });
   });
 });
 

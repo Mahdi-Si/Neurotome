@@ -33,7 +33,7 @@ IR schema (ir.json)::
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from typing import Any, cast
 
 import numpy as np
@@ -41,6 +41,7 @@ import torch
 
 from .errors import NO_GRAD, TraceError
 from .graph import strip_call
+from .interventions import diff_row
 from .jobs import Progress
 from .store import RunStore
 from .tensors import safe_range
@@ -84,13 +85,13 @@ def tensor_stats(a: np.ndarray, bins: int = 32) -> dict[str, Any]:
     }
 
 
-def _run_trace(model: torch.nn.Module, inputs: Any, save_grads: bool = False):
+def _run_trace(model: torch.nn.Module, inputs: Any, save_grads: bool = False, **kw):
     import torchlens as tl
 
     args = list(inputs) if isinstance(inputs, (tuple, list)) else inputs
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return tl.trace(model, args, layers_to_save="all", save_grads=save_grads, unwrap_when_done=True)
+        return tl.trace(model, args, layers_to_save="all", save_grads=save_grads, unwrap_when_done=True, **kw)
 
 
 def _visible_ops(trace) -> list:
@@ -127,12 +128,13 @@ def _first_tensor(value: Any) -> torch.Tensor | None:
     return None
 
 
-def _trace_or_raise(model: torch.nn.Module, inputs: Any, save_grads: bool = False):
+def _trace_or_raise(model: torch.nn.Module, inputs: Any, save_grads: bool = False, intervene=None):
+    """``intervene``: TorchLens capture-time hooks; a ValueError they raise reaches the caller unchanged."""
     try:
-        return _run_trace(model, inputs, save_grads)
-    except torch.cuda.OutOfMemoryError:
-        raise
+        return _run_trace(model, inputs, save_grads, **({"intervene": intervene} if intervene else {}))
     except Exception as e:  # noqa: BLE001 - anything TorchLens or forward() raises
+        if isinstance(e, torch.cuda.OutOfMemoryError) or (intervene and isinstance(e, ValueError)):
+            raise
         first = (str(e).strip().splitlines() or [""])[0][:300]
         raise TraceError(
             f"TorchLens could not trace forward(): {type(e).__name__}: {first}. Check that model(x) runs on "
@@ -396,78 +398,86 @@ def _merge(op, every: dict[str, Any], by_obj: dict[int, str]) -> dict[str, float
     }
 
 
-def patch(
+@torch.enable_grad()  # as at capture: no_grad sends nn.MultiheadAttention down its fused path (other op ids)
+def intervene(
     model: torch.nn.Module,
     inputs: Any,
-    op_id: str,
-    replace: Callable[[torch.Tensor], torch.Tensor],
-    keep: Iterable[str] = (),
+    edits: list[tuple[str, Callable[[torch.Tensor], torch.Tensor]]],
+    downstream: Collection[str],
+    keep: Collection[str] = (),
 ) -> dict[str, Any]:
-    """Re-run the forward pass with op_id's output replaced (TorchLens DAG replay).
-
-    Returns ``{"deltas": {op: ||after - before||_2},
-    "rel": {op: ||delta|| / ||before|| (0 when ||before|| = 0)},
-    "after": {op: tensor for op in keep}, "logits_after": first tensor of the output op}``.
-    """
-    import torchlens as tl
-
+    """One traced forward pass with every edit applied where its op runs (TorchLens capture-time hooks; edits
+    on one op compose in list order). Returns ``{"nodes": {op: diff row}, "stats": {op: tensor_stats(after)},
+    "after": {op: float32 array for op in keep}, "logits_after": the output op's tensor}``; nodes / stats
+    cover the downstream ops with a float tensor. TorchLens DAG replay stops at multi-pass ops (GPT-2's
+    residual adds), so this re-traces instead of replaying."""
+    # ponytail: two full traces; store raw_index in the IR at capture to skip the clean one for big models
     model.eval()
-    args = list(inputs) if isinstance(inputs, (tuple, list)) else inputs
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        trace = tl.trace(model, args, layers_to_save="all", intervention_ready=True, unwrap_when_done=True)
-    ops = _visible_ops(trace)
-    by_obj, by_label = _id_maps(ops)
-    before: dict[str, torch.Tensor] = {}
-    for op in ops:
-        t = _first_tensor(_safe(lambda op=op: op.out))
-        if t is not None:
-            before[by_obj[id(op)]] = t.detach().clone()  # before the replay mutates anything
-    op = next((o for o in ops if by_obj[id(o)] == op_id), None)
-    if op is None or op_id not in before:
-        raise ValueError(f"Unknown op {op_id}")
-    new = replace(before[op_id])
-    if tuple(new.shape) != tuple(before[op_id].shape):
-        raise ValueError(f"replacement shape {list(new.shape)} != {list(before[op_id].shape)}")
-    label = op.layer_label if op_id == op.layer_label else op.label  # .pN ids -> pass-qualified label
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        trace.do(tl.label(label), tl.replace_with(new), engine="replay", confirm_mutation=True)
+    clean = _visible_ops(_trace_or_raise(model, inputs))
+    by_obj, _ = _id_maps(clean)
+    ids = [by_obj[id(o)] for o in clean]
+    raw = {by_obj[id(o)]: o.raw_index for o in clean}
+    down = set(downstream)
+    before = {oid: _numpy(o) for o in clean if (oid := by_obj[id(o)]) in down}
+    fns: dict[str, list] = {}
+    for op, fn in edits:
+        if op not in raw:
+            raise ValueError(f"Unknown op {op}")
+        fns.setdefault(op, []).append(fn)
+    returned: dict[str, torch.Tensor] = {}
 
-    # Replay re-runs in-place funcs (x += y, ReLU(inplace)) on their parents' tensors, so an op whose tensor a
-    # later in-place op mutates reads that op's value. Ops outside the patched op's descendants cannot change
-    # (delta 0); a mutated descendant's own value is lost, so it is left out.
-    down, todo = {op_id}, [op]
-    while todo:
-        for c in _safe(lambda o=todo.pop(): o.children, []) or []:
-            if (cid := by_label.get(c)) and cid not in down:
-                down.add(cid)
-                todo.append(next(o for o in ops if by_obj[id(o)] == cid))
-    outs = [(by_obj[id(o)], _first_tensor(_safe(lambda o=o: o.out))) for o in ops]
-    lost, mutated = set(), set()
-    for o, (oid, t) in zip(reversed(ops), reversed(outs), strict=True):
-        if t is not None:
-            if t.data_ptr() in mutated:
-                lost.add(oid)
-            if _safe(lambda o=o: o.is_inplace, False):
-                mutated.add(t.data_ptr())
+    def make(op: str):
+        def hook(out, *, hook):  # TorchLens passes the hook spec keyword-only
+            if not torch.is_tensor(out):
+                raise ValueError(f"{op} returns several tensors; edit one of its consumers")
+            new = out
+            for fn in fns[op]:
+                new = fn(new)
+            if tuple(new.shape) != tuple(out.shape):
+                raise ValueError(f"Edit of {op} changed its shape {list(out.shape)} -> {list(new.shape)}")
+            returned[op] = new.detach().clone()  # a later in-place op may change the live tensor
+            return new
 
-    keep = set(keep)
-    deltas: dict[str, float] = {}
-    rel: dict[str, float] = {}
-    after: dict[str, torch.Tensor] = {}
-    for oid, a in outs:
-        b = before.get(oid)
-        if a is None or b is None or a.shape != b.shape or not b.is_floating_point():
+        return hook
+
+    hooks = {raw[op]: make(op) for op in fns}
+    edited = _visible_ops(_trace_or_raise(model, inputs, intervene=lambda ctx: hooks.get(ctx.raw_index)))
+    by_obj2, by_label = _id_maps(edited)
+    if [by_obj2[id(o)] for o in edited] != ids:
+        raise ValueError("The intervention changed the model's control flow; TorchLens cannot align the ops")
+    ops = {by_obj2[id(o)]: o for o in edited}
+    for op in fns:
+        rec = _first_tensor(_safe(lambda op=op: ops[op].out))
+        if op not in returned or rec is None or not _same(rec.detach(), returned[op]):
+            raise ValueError(_cannot_edit(op, ops[op], by_label))
+    nodes, stats, after = {}, {}, {}
+    for op, b in before.items():
+        a = _numpy(ops[op])
+        if a is None or b is None or a.shape != b.shape:
             continue
-        if oid not in down:
-            a = b
-        elif oid in lost:
-            continue
-        a = a.detach()
-        d, n = float((a.float() - b.float()).norm()), float(b.float().norm())
-        deltas[oid], rel[oid] = d, (d / n if n else 0.0)
-        if oid in keep:
-            after[oid] = a.clone()
-    out_op = next(o for o in ops if o.is_output)
-    return {"deltas": deltas, "rel": rel, "after": after, "logits_after": _out(out_op.out).detach()}
+        nodes[op], stats[op] = diff_row(b, a), tensor_stats(a)
+        if op in keep:
+            after[op] = a
+    out_op = next(o for o in edited if o.is_output)
+    return {"nodes": nodes, "stats": stats, "after": after, "logits_after": _out(out_op.out).detach()}
+
+
+def _numpy(op) -> np.ndarray | None:
+    """A float32 CPU copy of a float op's first tensor, else None."""
+    t = _first_tensor(_safe(lambda: op.out))
+    if t is None or not t.is_floating_point():
+        return None
+    return t.detach().to("cpu", torch.float32).numpy().copy()
+
+
+def _cannot_edit(op_id: str, op, by_label: dict[str, str]) -> str:
+    """An op whose edit TorchLens did not keep (it returns its input object, e.g. eval-mode dropout)."""
+    parent = next((by_label[p] for p in (_safe(lambda: op.parents, []) or []) if p in by_label), "?")
+    return (
+        f"TorchLens cannot edit {op_id} ({_safe(lambda: op.func_name, op.layer_type)}): it returns its input "
+        f"unchanged in eval mode. Edit its parent {parent} instead."
+    )
+
+
+def _same(a: torch.Tensor, b: torch.Tensor) -> bool:
+    return a.shape == b.shape and bool(((a == b) | (a.isnan() & b.isnan())).all())

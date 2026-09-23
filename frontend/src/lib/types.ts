@@ -13,7 +13,7 @@ export interface Stats {
   inf?: number;
 }
 
-export interface TopK { index: number; prob: number; logit: number; label: string | null }
+export interface TopK { index: number; prob: number | null; logit: number | null; label: string | null }  // null: non-finite
 
 export type Backend = "torchlens" | "nnsight";
 
@@ -74,7 +74,7 @@ export interface IndexEntry {
 /** Per-module fold overrides, as module calls, e.g. "layer1.0:1". */
 export interface Fold { expand: string[]; collapse: string[] }
 
-export type ColorMode = "plain" | "attr" | "norm" | "sparsity" | "nan" | "patch";
+export type ColorMode = "plain" | "attr" | "norm" | "sparsity" | "nan" | "iv";
 
 /** Per-node colour-mode value, computed by the view and drawn by GraphCanvas. */
 export interface NodeTone { v: number | null; flag?: boolean; readout: string } // v in [0,1] → tint + bar; flag → negative outline + badge
@@ -145,6 +145,7 @@ export interface VectorTensorView {
 export interface TensorOpts {
   channel?: number | null; py?: number | null; px?: number | null;
   norm?: Norm; cmap?: Cmap; lo?: number | null; hi?: number | null;
+  iv?: string | null;
 }
 
 export type SliceValue = number | "nan" | "inf" | "-inf";
@@ -180,7 +181,6 @@ export type TensorView = ImageTensorView | SequenceTensorView | VectorTensorView
 export type Method = "gxa" | "saliency" | "ig";
 
 export type LayerMethod = "layer_ig" | "layer_cond";
-export type Baseline = "zeros" | "mean" | "run";
 /** An internal unit as the attribution objective: Σ over positions of channel `channel` (axis 1) of op `op`. */
 export interface Objective { op: string; channel: number }
 export type ObjectiveInfo = { kind: "logit"; index: number } | { kind: "unit"; op: string; channel: number };
@@ -238,15 +238,37 @@ export interface AgreementResult {
   objective_label: string; steps: number; input: AgreementBlock | null; units: AgreementBlock | null; units_error: string | null;
 }
 
-export interface PatchResult {
-  op: string; path: string; baseline: Baseline; source_run: string | null; method_label: string;
-  target: number; target_label: string | null;
-  before: { logit: number; prob: number }; after: { logit: number; prob: number };
-  delta_logit: number; delta_prob: number; top_after: TopK[];
-  deltas: Record<string, number>; rel: Record<string, number>;   // keyed by op id (node.output_op)
+export type EditKind = "zero" | "mean" | "resample" | "constant" | "scale" | "steer";
+export type Positions = "last" | number[] | [number, number][] | null;
+export type SteerDirection =
+  | { kind: "contrast"; run_a: string; run_b: string; pool: "mean" | "last" }
+  | { kind: "channel"; channel: number };
+export interface Edit {
+  op: string; kind: EditKind; channels: number[] | null; positions: Positions;
+  over?: "positions" | "runs"; source_run?: string; seed?: number; value?: number; alpha?: number; direction?: SteerDirection;
+}
+export interface InterventionSet { edits: Edit[]; target: number | null }
+export interface NodeDiff { l2: number; rel: number; cos: number | null; max_abs: number; nonfinite?: number }  // nonfinite: positions that became / stopped being NaN or inf
+export interface InterventionSummary {
+  hash: string; name: string; created: number; labels: string[];
+  target: number; target_label: string | null; delta_logit: number | null; delta_prob: number | null; truncated: boolean;
+}
+export interface InterventionResult extends InterventionSummary {
+  run_id: string; set: InterventionSet; method_label: string;
+  before: { logit: number | null; prob: number | null }; after: { logit: number | null; prob: number | null };
+  top_before: TopK[]; top_after: TopK[];
+  edited: string[]; downstream: string[]; saved: string[];
+  budget_bytes: number | null; bytes: number;
+  nodes: Record<string, NodeDiff>; stats: Record<string, Stats>;   // keyed by op id (node.output_op)
+}
+export interface GenToken { id: number; token: string; prob: number | null }
+export interface Continuation { ids: number[]; tokens: string[]; text: string; top: GenToken[][] }
+export interface GenerationResult {
+  hash: string; n: number; labels: string[]; method_label: string;
+  prompt: string[]; clean: Continuation; steered: Continuation; diverge: number | null;
 }
 
-export type JobKind = "capture" | "attribution" | "layer" | "neuron" | "agreement" | "patch" | "lens";
+export type JobKind = "capture" | "attribution" | "layer" | "neuron" | "agreement" | "lens" | "intervene" | "generate";
 export type JobStatus = "queued" | "running" | "done" | "error" | "cancelled";
 export interface Job<R = unknown> {
   id: string; kind: JobKind; run_id: string | null; status: JobStatus;
@@ -257,8 +279,9 @@ export type JobRequest =
   | { kind: "layer"; method: LayerMethod; op: string; target: number | null; objective: Objective | null; steps: number }
   | { kind: "neuron"; op: string; channel: number; target: number | null; objective: Objective | null; steps: number }
   | { kind: "agreement"; op: string | null; target: number | null; objective: Objective | null; steps: number }
-  | { kind: "patch"; op: string; baseline: Baseline; source_run: string | null; target: number | null }
-  | { kind: "lens"; target: number | null };
+  | { kind: "lens"; target: number | null }
+  | { kind: "intervene"; interventions: InterventionSet }
+  | { kind: "generate"; interventions: InterventionSet; max_new_tokens: number };
 
 export interface CreateRun {
   model: string; weights: string | null; sample: Record<string, unknown>;

@@ -4,15 +4,17 @@ import { DivergingBars, DotMatrix } from "../components/charts";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { Crosshair } from "../components/Icons";
 import { InputOverlay, OverlayControls } from "../components/InputOverlay";
+import { InterventionBanner } from "../components/InterventionBanner";
 import { JobProgress } from "../components/JobProgress";
 import { TokenStrip } from "../components/TokenStrip";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
 import { fileName } from "../lib/exportPng";
-import { deltaLarge, displayName, num, pct, signed } from "../lib/format";
+import { deltaLarge, displayName, fixed, num, pct, signed } from "../lib/format";
 import { useJob } from "../lib/jobs";
 import { href, navigate, type Route } from "../lib/router";
 import { errText } from "../lib/tensorState";
+import { useAsync } from "../lib/useAsync";
 import { tokenLabels } from "../lib/tokens";
 import { attrRequest, layerOp, logitsBlocked, parseTraceParams, traceParams, type TraceState } from "../lib/traceState";
 import type { AgreementResult, Attribution, GraphView, Job, LayerMethod, LayerResult, Method, NeuronResult, RunMeta } from "../lib/types";
@@ -64,6 +66,8 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const latest = useRef(s);
   latest.current = s;
   const set = (p: Partial<TraceState>) => navigate(href(run.id, "trace", traceParams({ ...latest.current, go: false, ...p })), true);
+  const ivRes = useAsync(() => (s.iv ? api.intervention(run.id, s.iv) : null), [run.id, s.iv]);
+  const ivResult = ivRes.data?.hash === s.iv ? ivRes.data : null;
 
   const [depth, setDepth] = useState(1);
   const [overlay, setOverlay] = useState(false);
@@ -151,10 +155,12 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
 
   return (
     <>
-      <TopBar run={run} tab="trace" node={s.node}>
+      <TopBar run={run} tab="trace" node={s.node} carry={{ iv: s.iv }}>
         <button type="button" className="btn solid lbl" disabled={main.busy || blocked} title={blocked ? run.output_error ?? undefined : undefined}
           onClick={() => void runMain()}>Run attribution</button>
       </TopBar>
+      <InterventionBanner result={ivResult} error={s.iv ? ivRes.error : null} note="attribution runs on the clean pass"
+        clearHref={href(run.id, "trace", traceParams({ ...s, go: false, iv: null }))} />
       <div style={{ minHeight: 56, flexShrink: 0, display: "flex", alignItems: "center", gap: 24, padding: "8px 20px", borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
         {s.obj ? (
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
@@ -167,7 +173,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
             <span className="lbl dim">Target</span>
             <select className="field" value={s.t ?? ""} onChange={(e) => set({ t: e.target.value === "" ? null : Number(e.target.value) })}>
               {run.output.map((o) => (
-                <option key={o.index} value={o.index}>logit[{o.index}]{o.label ? ` · ${o.label}` : ""} · p {o.prob.toFixed(2)}</option>
+                <option key={o.index} value={o.index}>logit[{o.index}]{o.label ? ` · ${o.label}` : ""} · p {fixed(o.prob)}</option>
               ))}
               {s.t != null && !run.output.some((o) => o.index === s.t) && <option value={s.t}>logit[{s.t}]</option>}
               <option value="">top prediction</option>
@@ -332,9 +338,9 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
             <div style={{ display: "flex", justifyContent: "space-between" }}><span className="lbl">Top contributors</span><span className="lbl dim">Channels → objective</span></div>
             <div className="rule-top">
               {(attr?.top_units ?? []).map((u, i) => {
-                const n = byOp.get(u.op);
-                return <BarRow key={i} name={u.path ?? (n ? displayName(n) : u.op)} sub={`ch ${u.channel}`} value={u.value} max={maxUnit}
-                  to={href(run.id, "tensors", { node: n?.id ?? u.op, c: String(u.channel) })} />;
+                const n = byOp.get(u.op), d = ivResult?.nodes[u.op];
+                return <BarRow key={i} name={u.path ?? (n ? displayName(n) : u.op)} sub={`ch ${u.channel}${d ? ` · Δ rel ${pct(d.rel)}` : ""}`} value={u.value} max={maxUnit}
+                  to={href(run.id, "tensors", { node: n?.id ?? u.op, c: String(u.channel), iv: s.iv })} />;
               })}
               {!attr && <div className="kv"><span className="lbl dim">No attribution yet</span></div>}
             </div>

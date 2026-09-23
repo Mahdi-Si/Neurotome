@@ -10,7 +10,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from . import __version__
 from .attribution import METHODS
@@ -19,7 +19,7 @@ from .errors import describe
 from .graph import graph_view, module_tree, search_index, unsaved
 from .jobs import TERMINAL, Job
 from .models import SUGGESTED_MODELS, TEXT_MODELS
-from .runs import RunManager, _module
+from .runs import NotFound, RunManager, _module
 from .slicing import SliceTooLarge, slice_npy, slice_table
 from .store import PREVIEW, safe_name
 from .tensors import tensor_diff, tensor_view
@@ -59,16 +59,48 @@ class AttributionRequest(BaseModel):
     objective: Objective | None = None
 
 
+class Direction(BaseModel):
+    kind: Literal["contrast", "channel"]
+    run_a: str | None = None  # contrast
+    run_b: str | None = None
+    pool: Literal["mean", "last"] = "mean"
+    channel: int | None = Field(None, ge=0)  # channel
+
+
+class EditIn(BaseModel):
+    op: str
+    kind: Literal["zero", "mean", "resample", "constant", "scale", "steer"]
+    channels: list[int] | None = None  # None = every channel
+    positions: Literal["last"] | list[int] | list[tuple[int, int]] | None = None
+    over: Literal["positions", "runs"] = "positions"  # mean
+    source_run: str | None = None  # resample: a run id or "random"
+    seed: int = 0  # resample "random"
+    value: float = Field(0.0, allow_inf_nan=False)  # constant
+    alpha: float = Field(1.0, allow_inf_nan=False)  # scale, steer
+    direction: Direction | None = None  # steer
+
+
+class InterventionSetIn(BaseModel):
+    edits: list[EditIn]
+    target: int | None = Field(None, ge=0)
+
+
 class JobRequest(BaseModel):
-    kind: Literal["attribution", "layer", "neuron", "agreement", "patch", "lens"]
+    model_config = ConfigDict(extra="forbid")  # the M3 patch fields (baseline, source_run) are gone: 422
+
+    kind: Literal["attribution", "layer", "neuron", "agreement", "lens", "intervene", "generate"]
     method: str | None = None  # attribution: gxa|saliency|ig (default ig); layer: layer_ig|layer_cond
     target: int | None = None  # lens: a token id, None = the top prediction
     objective: Objective | None = None
     steps: int = Field(32, ge=1, le=512)
-    op: str | None = None  # layer / neuron / patch; agreement: optional (units block)
+    op: str | None = None  # layer / neuron; agreement: optional (units block)
     channel: int | None = Field(None, ge=0)  # neuron
-    baseline: Literal["zeros", "mean", "run"] = "zeros"  # patch
-    source_run: str | None = None  # patch, baseline == "run"
+    interventions: InterventionSetIn | None = None  # intervene, generate
+    max_new_tokens: int = Field(16, ge=1, le=64)  # generate
+
+
+class Rename(BaseModel):
+    name: str = Field(max_length=80)
 
 
 def create_app(manager: RunManager | None = None) -> FastAPI:
@@ -109,12 +141,21 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(404, f"Job {job_id} not found") from None
 
-    def _tensor(run_id: str, op_id: str):
+    def _tensor(run_id: str, op_id: str, iv: str | None = None):
+        """The op's tensor; with ``iv`` read through that intervention (``RunManager.iv_tensor``)."""
         _meta(run_id)
         try:
-            return store.load_tensor(run_id, op_id)
+            return manager.iv_tensor(run_id, iv, op_id) if iv else store.load_tensor(run_id, op_id)
+        except NotFound as e:
+            raise HTTPException(404, e.args[0]) from None
         except KeyError:
             raise HTTPException(404, _no_tensor(run_id, op_id)) from None
+
+    def _found(fn, *args):
+        try:
+            return fn(*args)
+        except NotFound as e:
+            raise HTTPException(404, e.args[0]) from None
 
     def _no_tensor(run_id: str, op_id: str) -> str:
         ir = store.ir(run_id)
@@ -206,8 +247,11 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         collapse: str = "",
         obj_op: str | None = None,
         obj_ch: int | None = Query(None, ge=0),
+        iv: str | None = None,
     ) -> dict[str, Any]:
-        ir = _ir(run_id)
+        """``iv``: ops the intervention recorded carry its stats (colour modes, the inspector histogram)."""
+        _meta(run_id)
+        ir = _found(manager.iv_ir, run_id, iv) if iv else store.ir(run_id)
         if (obj_op is None) != (obj_ch is None):
             raise HTTPException(400, "obj_op and obj_ch go together")
         objective = {"op": obj_op, "channel": obj_ch} if obj_op is not None else None
@@ -238,18 +282,19 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         cmap: Literal["seq", "div"] = "seq",
         lo: float | None = None,
         hi: float | None = None,
+        iv: str | None = None,
     ) -> dict[str, Any]:
-        arr = _tensor(run_id, op_id)
+        arr = _tensor(run_id, op_id, iv)
         pixel = (py, px) if py is not None and px is not None else None
         return tensor_view(arr, channel=channel, pixel=pixel, norm=norm, cmap=cmap, lo=lo, hi=hi)
 
     @app.get("/api/runs/{run_id}/ops/{op_id}/slice")
-    def op_slice(run_id: str, op_id: str, s: str = "") -> dict[str, Any]:
-        return slice_table(_tensor(run_id, op_id), s) | {"op": op_id}  # SliceError is a ValueError: 400
+    def op_slice(run_id: str, op_id: str, s: str = "", iv: str | None = None) -> dict[str, Any]:
+        return slice_table(_tensor(run_id, op_id, iv), s) | {"op": op_id}  # SliceError is a ValueError: 400
 
     @app.get("/api/runs/{run_id}/ops/{op_id}/slice.npy")
-    def op_slice_npy(run_id: str, op_id: str, s: str = "") -> Response:
-        arr = _tensor(run_id, op_id)
+    def op_slice_npy(run_id: str, op_id: str, s: str = "", iv: str | None = None) -> Response:
+        arr = _tensor(run_id, op_id, iv)
         try:
             data = slice_npy(arr, s)
         except SliceTooLarge as e:
@@ -258,8 +303,8 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         return Response(data, media_type="application/octet-stream", headers=headers)
 
     @app.get("/api/runs/{run_id}/diff")
-    def diff(run_id: str, a: str, b: str) -> dict[str, Any]:
-        return {"a": a, "b": b, **tensor_diff(_tensor(run_id, a), _tensor(run_id, b))}
+    def diff(run_id: str, a: str, b: str, a_iv: str | None = None, b_iv: str | None = None) -> dict[str, Any]:
+        return {"a": a, "b": b, **tensor_diff(_tensor(run_id, a, a_iv), _tensor(run_id, b, b_iv))}
 
     @app.get("/api/runs/{run_id}/input.png")
     def input_png(run_id: str) -> FileResponse:
@@ -281,6 +326,27 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
     def start_job(run_id: str, req: JobRequest) -> dict[str, Any]:
         _meta(run_id)
         return manager.job(run_id, req.model_dump()).to_json()
+
+    @app.get("/api/runs/{run_id}/interventions")
+    def interventions(run_id: str) -> list[dict[str, Any]]:
+        _meta(run_id)
+        return manager.interventions(run_id)
+
+    @app.get("/api/runs/{run_id}/interventions/{h}")
+    def intervention(run_id: str, h: str) -> dict[str, Any]:
+        _meta(run_id)
+        return _found(manager.intervention, run_id, h)
+
+    @app.patch("/api/runs/{run_id}/interventions/{h}")
+    def rename_intervention(run_id: str, h: str, req: Rename) -> dict[str, Any]:
+        _meta(run_id)
+        return _found(manager.rename, run_id, h, req.name)
+
+    @app.delete("/api/runs/{run_id}/interventions/{h}")
+    def delete_intervention(run_id: str, h: str) -> dict[str, bool]:
+        _meta(run_id)
+        _found(manager.delete_intervention, run_id, h)
+        return {"deleted": True}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:

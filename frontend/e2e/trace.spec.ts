@@ -23,9 +23,10 @@ test("integrated gradients, then method agreement", async ({ page }) => {
   await expect(page.getByRole("img", { name: /· jaccard$/ }).first()).toBeVisible({ timeout: 30_000 });
 });
 
-test("patch & re-run colours the graph by Patch Δ", async ({ page }) => {
+test("intervene from the inspector colours the graph by Intervention Δ", async ({ page }) => {
   await page.goto(url(`#/runs/${run.id}/graph?depth=12&node=${encodeURIComponent(conv)}`));
-  await page.getByRole("button", { name: "Patch & re-run" }).click();
-  await expect(page).toHaveURL(/color=patch/);
-  await expect(page.getByText(/^Patch Δ = /)).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("button", { name: "Add to set" }).click();
+  await page.getByRole("button", { name: "Run set (1)" }).click();
+  await expect(page).toHaveURL(/color=iv/, { timeout: 30_000 });
+  await expect(page.getByText(/^Intervention Δ = /)).toBeVisible({ timeout: 30_000 });
 });

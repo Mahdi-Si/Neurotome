@@ -4,7 +4,7 @@ import { JobProgress } from "../components/JobProgress";
 import { ThemeToggle } from "../components/TopBar";
 import { api } from "../lib/api";
 import { isTextSpec, parseBudget, parseModules } from "../lib/capture";
-import { bytes } from "../lib/format";
+import { bytes, fixed } from "../lib/format";
 import { followJob } from "../lib/jobs";
 import { href, navigate } from "../lib/router";
 import { errText } from "../lib/tensorState";
@@ -188,7 +188,7 @@ export function HomeView() {
                   <span className="mono">{r.model.saved_ops != null && r.model.saved_ops < r.model.num_ops ? `${r.model.saved_ops}/${r.model.num_ops}` : r.model.num_ops}</span>
                   <span className="mono">{bytes(r.model.activation_bytes)}</span>
                   <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {r.output[0] ? `${r.output[0].label ?? `#${r.output[0].index}`} · ${r.output[0].prob.toFixed(2)}` : "—"}
+                    {r.output[0] ? `${r.output[0].label ?? `#${r.output[0].index}`} · ${fixed(r.output[0].prob)}` : "—"}
                   </span>
                   <button type="button" className="lbl dim" aria-label={`Delete ${r.id}`} style={{ border: 0, background: "transparent", cursor: "pointer", justifySelf: "end" }}
                     onClick={async () => { await api.deleteRun(r.id); setReload((x) => x + 1); }}>Delete</button>

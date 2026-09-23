@@ -6,37 +6,32 @@ at module granularity: one op per leaf-module call, id ``f"{address}@{call}"`` (
 module-call stack, tensor pointers (edges by tensor identity) and the values, copied at the hook because a
 later in-place op (``ReLU(inplace=True)``, ``+=``) changes the live tensor. Functional ops between modules
 (residual adds, softmax outside a module) are invisible; an input no module produced falls back to the
-previous leaf call as its parent. ``flops`` is 0, patching is not supported.
+previous leaf call as its parent. ``flops`` is 0. Interventions edit leaf-module calls natively
+(``env.output = fn(env.output)``).
 """
 
 from __future__ import annotations
 
 import importlib.util
 import warnings
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
-from functools import partial
+from functools import partial, reduce
 from typing import Any
 
 import torch
 
 from .capture import _check_modules, _first_tensor, _grad_leaf, tensor_stats
 from .errors import NO_GRAD, TraceError
+from .interventions import diff_row
 from .jobs import Progress
 from .store import RunStore
 
 MISSING = "The nnsight backend needs the nnsight extra: pip install 'neurotome[nnsight]'"
-PATCH = (
-    "Activation patching replays TorchLens ops; this run was captured with NNsight (module outputs only). "
-    "Capture it again with the TorchLens backend to patch."
-)
 
 
 def available() -> bool:
     return importlib.util.find_spec("nnsight") is not None
-
-
-def patch(*_a, **_k):
-    raise ValueError(PATCH)
 
 
 @dataclass
@@ -130,25 +125,34 @@ def _inside(address: str, selection: set[str]) -> bool:
     return not selection or any(address == s or address.startswith(s + ".") for s in selection)
 
 
-def _trace(model: torch.nn.Module, args: tuple, keep: set[str]) -> _Recorder:
+def _nnsight():
     try:
         from nnsight import NNsight
     except ImportError as e:
         raise ValueError(MISSING) from e
+    return NNsight
+
+
+def _raise(e: Exception, edits: bool = False):
+    orig = getattr(e, "original", e)  # NNsightException wraps forward()'s exception
+    if isinstance(orig, torch.cuda.OutOfMemoryError) or (edits and isinstance(orig, ValueError)):
+        raise orig from None
+    first = (str(orig).strip().splitlines() or [""])[0][:300]
+    raise TraceError(
+        f"NNsight could not trace forward(): {type(orig).__name__}: {first}. Check that model(x) runs on "
+        "this input outside Neurotome."
+    ) from e
+
+
+def _trace(model: torch.nn.Module, args: tuple, keep: set[str]) -> _Recorder:
+    NNsight = _nnsight()
     try:
         with _Recorder(model, keep=keep) as rec, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with NNsight(model).trace(*args):
                 pass
     except Exception as e:  # noqa: BLE001 - anything NNsight or forward() raises
-        orig = getattr(e, "original", e)  # NNsightException wraps forward()'s exception
-        if isinstance(orig, torch.cuda.OutOfMemoryError):
-            raise orig from None
-        first = (str(orig).strip().splitlines() or [""])[0][:300]
-        raise TraceError(
-            f"NNsight could not trace forward(): {type(orig).__name__}: {first}. Check that model(x) runs on "
-            "this input outside Neurotome."
-        ) from e
+        _raise(e)
     return rec
 
 
@@ -327,3 +331,87 @@ def op_gradients(
         "channel_scores": channel_scores,
         "merges": {},
     }
+
+
+@torch.enable_grad()  # as at capture: no_grad lets fused fast paths skip submodule calls
+def intervene(
+    model: torch.nn.Module,
+    inputs: Any,
+    edits: list[tuple[str, Callable[[torch.Tensor], torch.Tensor]]],
+    downstream: Collection[str],
+    keep: Collection[str] = (),
+) -> dict[str, Any]:
+    """``capture.intervene`` on leaf-module calls: a clean pass, then one NNsight pass that sets
+    ``env.output = fn(env.output)`` at each edited call, in execution order. The recorder's hooks see an
+    edited call before NNsight's swap, so its after value is ``fn(recorded)``; its consumers see the edit."""
+    NNsight = _nnsight()
+    model.eval()
+    args = _args(inputs)
+    leaves = {a for a, m in model.named_modules() if next(m.children(), None) is None}
+    fns: dict[str, list] = {}
+    for op, fn in edits:
+        if op.rpartition("@")[0] not in leaves:
+            raise ValueError(f"Unknown op {op}")
+        fns.setdefault(op, []).append(fn)
+    down = set(downstream)
+    addresses = {op.rpartition("@")[0] for op in down}
+    clean = _trace(model, args, addresses)
+    order = [c.id for c in clean.calls]
+    for op in fns:
+        if op not in order:
+            raise ValueError(f"Unknown op {op}")
+    before = _values(clean, down)
+
+    def composed(op: str):
+        def fn(t):
+            if not torch.is_tensor(t):
+                raise ValueError(f"{op} returns several tensors; edit one of its consumers")
+            new = t
+            for f in fns[op]:
+                new = f(new)
+            if tuple(new.shape) != tuple(t.shape):
+                raise ValueError(f"Edit of {op} changed its shape {list(t.shape)} -> {list(new.shape)}")
+            return new
+
+        return fn
+
+    todo = [(op, composed(op)) for op in sorted(fns, key=order.index)]
+    nn_model: Any = NNsight(model)
+    try:
+        with _Recorder(model, keep=addresses) as rec, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with nn_model.trace(*args) as tr:
+                for op, fn in todo:
+                    address, _, call = op.rpartition("@")
+                    env = reduce(
+                        getattr, address.split("."), nn_model
+                    )  # ModuleList children are "0", "1", ...
+                    # every edit inside tr.iter: the per-module call tracker only counts while an iter is open
+                    for _ in tr.iter[int(call) - 1]:
+                        env.output = fn(env.output)
+                out = nn_model.output.save()
+    except Exception as e:  # noqa: BLE001 - anything NNsight, forward() or an edit raises
+        _raise(e, edits=True)
+    after = _values(rec, down)
+    for op, fn in todo:
+        if op in after:
+            after[op] = fn(torch.from_numpy(after[op])).numpy()
+    nodes, stats, kept = {}, {}, {}
+    for op, b in before.items():
+        a = after.get(op)
+        if a is None or a.shape != b.shape:
+            continue
+        nodes[op], stats[op] = diff_row(b, a), tensor_stats(a)
+        if op in keep:
+            kept[op] = a
+    return {"nodes": nodes, "stats": stats, "after": kept, "logits_after": out}
+
+
+def _values(rec: _Recorder, ops: set[str]) -> dict[str, Any]:
+    """Float32 arrays of the recorded float calls in ``ops`` (and the output op)."""
+    vals = {c.id: c.value for c in rec.calls if c.id in ops and c.value is not None and c.out is not None
+            and c.out.is_floating_point()}  # fmt: skip
+    out = _output_tensor(rec.output)
+    if "output_1" in ops and out is not None and out.is_floating_point():
+        vals["output_1"] = out.detach().to("cpu", torch.float32).numpy().copy()
+    return vals

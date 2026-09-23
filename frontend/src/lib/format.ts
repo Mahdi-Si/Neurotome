@@ -22,9 +22,13 @@ export function num(n: number | null | undefined, digits = 2): string {
   return n.toFixed(digits);
 }
 
-export function signed(n: number, digits = 3): string {
+export function signed(n: number | null | undefined, digits = 3): string {
+  if (n == null || !Number.isFinite(n)) return "—";
   return `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(digits)}`;
 }
+
+/** n.toFixed(digits), "—" when missing or non-finite (a probability after an overflowing edit). */
+export const fixed = (n: number | null | undefined, digits = 2) => (n == null || !Number.isFinite(n) ? "—" : n.toFixed(digits));
 
 export const shape = (s: number[] | null | undefined) => (s && s.length ? s.join("×") : "—");
 
@@ -37,7 +41,9 @@ export const shapeShort = (s: number[] | null | undefined) =>
 export const deltaLarge = (delta: number | null | undefined, total: number) => delta != null && delta > 0.1 * Math.abs(total);
 
 export function pct(n: number | null | undefined): string {
-  return n == null ? "—" : `${Math.round(n * 100)}%`;
+  if (n == null) return "—";
+  const p = n * 100;   // one decimal below 10 % so a small scoped Δ does not read as 0 %
+  return p !== 0 && Math.abs(p) < 10 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`;
 }
 
 /** "torch.float32" → "float32"; missing (pre-M1 runs) → "—". */

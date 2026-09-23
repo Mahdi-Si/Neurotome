@@ -1,6 +1,6 @@
 // Pure graph-workspace state: fold overrides in the URL, search ranking, colour modes.
 import { num, pct, shape, shapeShort } from "./format";
-import type { Baseline, ColorMode, Fold, GraphView, IndexEntry, NodeTone, PatchResult, Stats } from "./types";
+import type { ColorMode, Fold, GraphView, IndexEntry, InterventionResult, NodeTone, Stats } from "./types";
 
 const list = (s: string | null) => (s ?? "").split(",").filter(Boolean);
 const uniq = (a: string[]) => [...new Set(a)];
@@ -56,26 +56,10 @@ export function searchIndex(entries: IndexEntry[], q: string, limit = 8): IndexE
 
 export function colorMode(params: URLSearchParams): ColorMode {
   const c = params.get("color");
-  if (c === "attr" || c === "norm" || c === "sparsity" || c === "nan" || c === "patch") return c;
+  if (c === "attr" || c === "norm" || c === "sparsity" || c === "nan" || c === "iv") return c;
+  if (c === "patch") return "iv";   // M3 links
   return params.get("overlay") === "attr" ? "attr" : "plain";
 }
-
-export interface PatchState { op: string; baseline: Baseline; source: string | null }
-
-/** URL patch=<op>&pb=zeros|mean|run&psrc=<run>; pb defaults to zeros, psrc is only read for run (and required). */
-export function parsePatch(params: URLSearchParams): PatchState | null {
-  const op = params.get("patch");
-  const pb = params.get("pb");
-  const baseline: Baseline = pb === "mean" || pb === "run" ? pb : "zeros";
-  const source = baseline === "run" ? params.get("psrc") : null;
-  return op && (baseline !== "run" || source) ? { op, baseline, source } : null;
-}
-
-export const patchParams = (p: PatchState | null) => ({
-  patch: p?.op ?? null,
-  pb: p && p.baseline !== "zeros" ? p.baseline : null,
-  psrc: p?.baseline === "run" ? p.source : null,
-});
 
 /** RMS over finite values, exact from population mean and std. */
 export const rms = (st: Stats | null | undefined) =>
@@ -83,20 +67,22 @@ export const rms = (st: Stats | null | undefined) =>
 
 export interface Legend { title: string; lo: string; hi: string; note?: string }
 
-export function nodeTones(view: GraphView, mode: ColorMode, patch?: PatchResult | null): { tones?: Map<string, NodeTone>; legend: Legend | null } {
+export function nodeTones(view: GraphView, mode: ColorMode, iv?: InterventionResult | null): { tones?: Map<string, NodeTone>; legend: Legend | null } {
   const tones = new Map<string, NodeTone>();
-  if (mode === "patch") {
-    if (!patch) return { legend: null };
-    // normalise by the largest change elsewhere; the patched node itself would always be rel 1
-    const own = view.nodes.find((n) => n.output_op === patch.op)?.id;
-    const max = Math.max(0, ...view.nodes.filter((n) => n.id !== own).map((n) => patch.rel[n.output_op] ?? 0));
+  if (mode === "iv") {
+    if (!iv) return { legend: null };
+    const edited = new Set(iv.edited), down = new Set(iv.downstream);
+    // normalise by the largest change outside the edited ops; an edited op is the cause, not an effect
+    const max = Math.max(0, ...view.nodes.filter((n) => down.has(n.output_op) && !edited.has(n.output_op)).map((n) => iv.nodes[n.output_op]?.rel ?? 0));
     for (const n of view.nodes) {
-      const r = patch.rel[n.output_op];
-      tones.set(n.id, n.id === own ? { v: 1, readout: `patched · ${patch.baseline}` }
-        : r == null ? { v: null, readout: "‖Δ‖ —" }
-        : { v: max > 0 ? Math.min(1, Math.max(0, r / max)) : 0, readout: `‖Δ‖ ${num(patch.deltas[n.output_op])} · rel ${pct(r)}` });
+      const op = n.output_op, d = iv.nodes[op];
+      tones.set(n.id, edited.has(op) ? { v: 1, readout: `edited · ${iv.labels.filter((_, i) => iv.set.edits[i]?.op === op).join(" · ")}` }
+        : !down.has(op) ? { v: 0, readout: "unchanged · not downstream" }
+        : !d ? { v: null, readout: "‖Δ‖ —" }
+        : { v: d.nonfinite ? 1 : max > 0 ? Math.min(1, d.rel / max) : 0,   // NaN / inf appeared or went: maximal Δ
+            readout: `${d.nonfinite ? `${d.nonfinite} values changed to or from NaN/inf · finite: ` : ""}‖Δ‖ ${num(d.l2)} · rel ${pct(d.rel)} · cos ${d.cos == null ? "—" : d.cos.toFixed(3)} · max|Δ| ${num(d.max_abs)}` });
     }
-    return { tones, legend: { title: `Patch Δ = ‖after − before‖ / ‖before‖ · ${patch.path} → ${patch.baseline}`, lo: "0", hi: pct(max) } };
+    return { tones, legend: { title: `Intervention Δ = ‖after − before‖ / ‖before‖ · ${iv.name}`, lo: "0", hi: pct(max) } };
   }
   if (mode === "attr") {
     for (const n of view.nodes) tones.set(n.id, { v: n.score_norm ?? null, readout: `|g×a| ${num(n.score, 3)}` });

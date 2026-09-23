@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { api } from "./api";
-import { compact, deltaLarge, shapeShort, signed } from "./format";
+import { compact, deltaLarge, fixed, pct, shapeShort, signed } from "./format";
 import { href, parseHash } from "./router";
 
 describe("router", () => {
@@ -22,6 +22,15 @@ describe("router", () => {
     expect(r.params.get("t")).toBe("17");
     expect(r.params.has("pos")).toBe(false);
   });
+  it("routes the interventions tab with iv and set", () => {
+    const set = JSON.stringify({ edits: [{ op: "conv2d_1_1", kind: "zero", channels: null, positions: null }], target: null });
+    const h = href("run_0003", "interventions", { node: "conv2d_1_1", iv: "3f9a0c1d2e4b", set });
+    expect(h.startsWith("#/runs/run_0003/interventions?")).toBe(true);
+    const r = parseHash(h);
+    expect(r.tab).toBe("interventions");
+    expect(r.params.get("iv")).toBe("3f9a0c1d2e4b");
+    expect(JSON.parse(r.params.get("set")!).edits[0].op).toBe("conv2d_1_1");
+  });
 });
 
 describe("format", () => {
@@ -29,6 +38,8 @@ describe("format", () => {
     expect(compact(11_689_512)).toBe("11.7 M");
     expect(shapeShort([1, 64, 56, 56])).toBe("64×56×56");
     expect(signed(-0.0514)).toBe("−0.051");
+    expect([signed(null), signed(NaN), fixed(null), fixed(0.456), fixed(Infinity, 3)]).toEqual(["—", "—", "—", "0.46", "—"]);
+    expect([pct(0), pct(0.0042), pct(0.64), pct(null)]).toEqual(["0%", "0.4%", "64%", "—"]);
   });
   it("flags a large IG completeness Δ relative to Σ attributions", () => {
     expect(deltaLarge(28.6, 3.1)).toBe(true);

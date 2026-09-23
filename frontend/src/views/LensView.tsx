@@ -3,7 +3,7 @@ import { LinePlot, Readout, pngName } from "../components/charts";
 import { JobProgress } from "../components/JobProgress";
 import { TopBar } from "../components/TopBar";
 import { exportSvg, fileName } from "../lib/exportPng";
-import { num } from "../lib/format";
+import { fixed, num } from "../lib/format";
 import { useJob } from "../lib/jobs";
 import { clip, lensCellText, lensColumn, lensParams, lensReadout, parseLensParams, shortLayer, type LensMode, type LensState } from "../lib/lensState";
 import { href, navigate, type Route } from "../lib/router";
@@ -46,7 +46,7 @@ export function LensViewPage({ run, route }: { run: RunMeta; route: Route }) {
           <select className="field" value={s.t ?? ""} onChange={(e) => set({ t: e.target.value === "" ? null : Number(e.target.value) })}>
             <option value="">top prediction</option>
             {run.output.map((o) => (
-              <option key={o.index} value={o.index}>{o.label != null ? showToken(o.label) : `#${o.index}`} · p {o.prob.toFixed(2)}</option>
+              <option key={o.index} value={o.index}>{o.label != null ? showToken(o.label) : `#${o.index}`} · p {fixed(o.prob)}</option>
             ))}
             {s.t != null && !run.output.some((o) => o.index === s.t) && <option value={s.t}>#{s.t}</option>}
           </select>

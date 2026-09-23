@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { CaptureBanner } from "../components/CaptureBanner";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { GraphSearch } from "../components/GraphSearch";
+import { InterventionBanner } from "../components/InterventionBanner";
 import { Inspector, ModuleTree } from "../components/panels";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
 import {
-  callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, parsePatch, patchParams, revealFold, toggleFold, withinGroup,
+  callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, revealFold, toggleFold, withinGroup,
 } from "../lib/graphState";
+import { parseSet, setParam } from "../lib/interventionState";
 import { useJob } from "../lib/jobs";
-import { href, navigate, type Route } from "../lib/router";
-import type { ColorMode, GraphView as GV, IndexEntry, PatchResult, RunMeta } from "../lib/types";
+import { href, navigate, parseHash, type Route } from "../lib/router";
+import type { ColorMode, GraphView as GV, IndexEntry, InterventionResult, InterventionSet, RunMeta } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
 
 export function pickNodeForModule(view: GV, address: string): string | null {
@@ -30,7 +32,7 @@ export function pickNodeForModule(view: GV, address: string): string | null {
 
 const COLOURS: { id: ColorMode; label: string }[] = [
   { id: "plain", label: "Plain" }, { id: "attr", label: "Attr" }, { id: "norm", label: "Norm" },
-  { id: "sparsity", label: "Sparsity" }, { id: "nan", label: "NaN/Inf" }, { id: "patch", label: "Patch Δ" },
+  { id: "sparsity", label: "Sparsity" }, { id: "nan", label: "NaN/Inf" }, { id: "iv", label: "Intervention Δ" },
 ];
 
 export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
@@ -39,22 +41,23 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const attr = color === "attr";
   const fold = parseFold(route.params);
   const fp = foldParams(fold);
-  const graph = useAsync(() => api.graph(run.id, depth, attr ? { method: "gxa" } : undefined, fold), [run.id, depth, attr, fp.expand, fp.collapse]);
+  const iv = route.params.get("iv") || null;
+  const set = parseSet(route.params);
+  const graph = useAsync(() => api.graph(run.id, depth, attr ? { method: "gxa" } : undefined, fold, iv), [run.id, depth, attr, fp.expand, fp.collapse, iv]);
+  const ivRes = useAsync(() => (iv ? api.intervention(run.id, iv) : null), [run.id, iv]);
+  const ivResult = ivRes.data?.hash === iv ? ivRes.data : null;
   const modules = useAsync(() => api.modules(run.id), [run.id]);
   const index = useAsync(() => api.index(run.id), [run.id]);
   const view = graph.data;
   const [query, setQuery] = useState("");
   const [centre, setCentre] = useState(0);
-  const [nonce, setNonce] = useState(0);   // re-runs an unchanged patch (after a cancel or an error)
-  const ps = parsePatch(route.params);
-  const pj = useJob<PatchResult>();
-  useEffect(() => {
-    if (ps) void pj.run(run.id, { kind: "patch", op: ps.op, baseline: ps.baseline, source_run: ps.source, target: null });
-    else pj.cancel();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [run.id, ps?.op, ps?.baseline, ps?.source, nonce]);
-  const pr = pj.job?.result;
-  const patchResult = ps && pr && pr.op === ps.op && pr.baseline === ps.baseline && pr.source_run === ps.source ? pr : null;
+  const ij = useJob<InterventionResult>();
+  const onRun = async (s: InterventionSet) => {
+    const r = await ij.run(run.id, { kind: "intervene", interventions: s });
+    if (!r) return;
+    const p = Object.fromEntries(parseHash(location.hash).params);   // the URL now, not the one the job started from
+    navigate(href(run.id, "graph", { ...p, iv: r.hash, color: "iv" }), true);
+  };
 
   const selectedId = route.params.get("node");
   const selected = useMemo(() => {
@@ -67,10 +70,10 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
   }, [view, selectedId]);
   // focus (and search centring) waits until the requested node is really in the view, not a fallback
   const exact = !!selected && (!selectedId || selected.id === selectedId || selected.output_op === selectedId);
-  const { tones, legend } = useMemo(() => (view ? nodeTones(view, color, patchResult) : { tones: undefined, legend: null }), [view, color, patchResult]);
+  const { tones, legend } = useMemo(() => (view ? nodeTones(view, color, ivResult) : { tones: undefined, legend: null }), [view, color, ivResult]);
 
   const state = (params: Record<string, string | null>) =>
-    ({ node: selected?.id ?? null, depth: String(depth), ...fp, color: color === "plain" ? null : color, ...patchParams(ps), ...params });
+    ({ node: selected?.id ?? null, depth: String(depth), ...fp, color: color === "plain" ? null : color, iv, set: setParam(set), ...params });
   const go = (params: Record<string, string | null>) => navigate(href(run.id, "graph", state(params)), true);
 
   const onToggle = (call: string, open: boolean) => {
@@ -99,23 +102,25 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
 
   return (
     <>
-      <TopBar run={run} tab="graph" node={selected?.id}>
-        <span className="lbl dim">Depth</span>
+      <TopBar run={run} tab="graph" node={selected?.id} carry={{ iv, set: setParam(set) }}>
+        <span style={pair}><span className="lbl dim">Depth</span>
         <div className="seg lbl" role="group" aria-label="Nesting depth">
           {[0, 1, 2, 3, 4].map((d) => (
             <button key={d} type="button" aria-pressed={d === depth} onClick={() => go({ depth: String(d), expand: null, collapse: null })}>{d}</button>
           ))}
           <button type="button" aria-pressed={depth >= 12} onClick={() => go({ depth: "12", expand: null, collapse: null })}>All</button>
-        </div>
-        <span className="lbl dim">Colour</span>
+        </div></span>
+        <span style={pair}><span className="lbl dim">Colour</span>
         <div className="seg lbl" role="group" aria-label="Node colour">
           {COLOURS.map((c) => (
             <button key={c.id} type="button" aria-pressed={c.id === color} onClick={() => go({ color: c.id === "plain" ? null : c.id })}
-              disabled={c.id === "patch" && !ps} title={c.id === "patch" && !ps ? "Run a patch from the inspector first" : undefined}>{c.label}</button>
+              disabled={c.id === "iv" && !iv} title={c.id === "iv" && !iv ? "Run an intervention first" : undefined}>{c.label}</button>
           ))}
-        </div>
+        </div></span>
       </TopBar>
       <CaptureBanner run={run} />
+      <InterventionBanner result={ivResult} error={iv ? ivRes.error : null}
+        clearHref={href(run.id, "graph", state({ iv: null, ...(color === "iv" && { color: null }) }))} />
       <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
         <aside style={{ width: 248, flexShrink: 0, borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {modules.data && (
@@ -157,13 +162,13 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
         <aside className="panel" style={{ width: 360, flexShrink: 0, borderLeft: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {view && <Inspector runId={run.id} view={view} node={selected} total={view.nodes.length}
             linkFor={(id) => href(run.id, "graph", state({ node: id }))}
-            patch={run.model.backend === "nnsight" ? undefined : {  // patching replays TorchLens ops
-              spec: run.model.spec, weights: run.model.weights, state: ps, job: pj.job, error: pj.error, result: patchResult, onCancel: pj.cancel,
-              onApply: (p) => { go({ ...patchParams(p), color: "patch" }); setNonce((n) => n + 1); },
-              onClear: () => go({ ...patchParams(null), ...(color === "patch" && { color: null }) }),
+            intervention={{
+              run, set, onSet: (s) => go({ set: setParam(s) }), result: ivResult, onRun, job: ij.job, error: ij.error, onCancel: ij.cancel,
             }} />}
         </aside>
       </div>
     </>
   );
 }
+
+const pair: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10, flexShrink: 0 };

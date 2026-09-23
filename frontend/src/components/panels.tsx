@@ -9,7 +9,7 @@ import { traceParams } from "../lib/traceState";
 import type { GraphNode, GraphView, ModuleEntry } from "../lib/types";
 import { Histogram } from "./charts";
 import { Crosshair, IconSearch } from "./Icons";
-import { PatchPanel, type PatchProps } from "./PatchPanel";
+import { InterventionPanel, type InterventionPanelProps } from "./InterventionPanel";
 
 export function ModuleTree({ modules, selectedPath, onPick }: {
   modules: ModuleEntry[]; selectedPath: string | null; onPick: (address: string) => void;
@@ -54,8 +54,9 @@ export function ModuleTree({ modules, selectedPath, onPick }: {
   );
 }
 
-export function Inspector({ runId, view, node, total, linkFor = (id) => href(runId, "graph", { node: id }), patch }: {
-  runId: string; view: GraphView; node: GraphNode | null; total: number; linkFor?: (id: string) => string; patch?: PatchProps;
+export function Inspector({ runId, view, node, total, linkFor = (id) => href(runId, "graph", { node: id }), intervention }: {
+  runId: string; view: GraphView; node: GraphNode | null; total: number; linkFor?: (id: string) => string;
+  intervention?: Omit<InterventionPanelProps, "node">;
 }) {
   const rel = useMemo(() => {
     if (!node) return { from: [] as GraphNode[], to: [] as GraphNode[], rank: null as number | null };
@@ -138,7 +139,7 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
           </div>
         ))}
       </div>
-      {patch && <PatchPanel key={[node.id, patch.state?.op, patch.state?.baseline, patch.state?.source].join("|")} runId={runId} node={node} patch={patch} />}
+      {intervention && <InterventionPanel {...intervention} node={node} key={node.id} />}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: "auto" }}>
         {node.shape.length >= 2 && <TraceFrom key={node.id} runId={runId} node={node} />}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>

@@ -1,6 +1,6 @@
 import type {
-  Attribution, CreateRun, DiffResult, Fold, GraphView, Health, IndexEntry, Job, JobRequest, Method, ModelsInfo, ModuleEntry, Objective, RunMeta,
-  SliceResult,
+  Attribution, CreateRun, DiffResult, Fold, GraphView, Health, IndexEntry, InterventionResult, InterventionSummary, Job, JobRequest, Method,
+  ModelsInfo, ModuleEntry, Objective, RunMeta, SliceResult,
   TensorOpts, TensorView,
 } from "./types";
 
@@ -25,6 +25,9 @@ const json = (body: unknown): RequestInit => ({
 });
 
 const enc = encodeURIComponent;
+/** `?key=value` params, dropping null / undefined values. */
+const qs = (o: Record<string, string | null | undefined>) =>
+  new URLSearchParams(Object.entries(o).filter((e): e is [string, string] => e[1] != null));
 
 export const api = {
   health: () => req<Health>("/api/health"),
@@ -39,7 +42,7 @@ export const api = {
     return req<{ upload_id: string; name: string }>("/api/uploads", { method: "POST", body: fd });
   },
   modules: (id: string) => req<ModuleEntry[]>(`/api/runs/${enc(id)}/modules`),
-  graph: (id: string, depth: number, attr?: { method: Method; target?: number | null; steps?: number; objective?: Objective | null }, fold?: Fold) => {
+  graph: (id: string, depth: number, attr?: { method: Method; target?: number | null; steps?: number; objective?: Objective | null }, fold?: Fold, iv?: string | null) => {
     const q = new URLSearchParams({ depth: String(depth) });
     if (attr) {
       q.set("method", attr.method);
@@ -49,6 +52,7 @@ export const api = {
     }
     if (fold?.expand.length) q.set("expand", fold.expand.join(","));
     if (fold?.collapse.length) q.set("collapse", fold.collapse.join(","));
+    if (iv) q.set("iv", iv);
     return req<GraphView>(`/api/runs/${enc(id)}/graph?${q}`);
   },
   index: (id: string) => req<IndexEntry[]>(`/api/runs/${enc(id)}/index`),
@@ -59,14 +63,22 @@ export const api = {
     if (opts.norm === "global") q.set("norm", "global");
     if (opts.cmap === "div") q.set("cmap", "div");
     if (opts.lo != null && opts.hi != null) { q.set("lo", String(opts.lo)); q.set("hi", String(opts.hi)); }
+    if (opts.iv) q.set("iv", opts.iv);
     return req<TensorView>(`/api/runs/${enc(id)}/ops/${enc(op)}/tensor?${q}`);
   },
   inputPreviewUrl: (id: string, created: number) => `/api/runs/${enc(id)}/input.png?v=${created}`,
-  slice: (id: string, op: string, s: string) =>
-    req<SliceResult>(`/api/runs/${enc(id)}/ops/${enc(op)}/slice?${new URLSearchParams({ s })}`),
-  sliceNpy: async (id: string, op: string, s: string) =>
-    (await ok(await fetch(`/api/runs/${enc(id)}/ops/${enc(op)}/slice.npy?${new URLSearchParams({ s })}`))).blob(),
-  diff: (id: string, a: string, b: string) => req<DiffResult>(`/api/runs/${enc(id)}/diff?${new URLSearchParams({ a, b })}`),
+  slice: (id: string, op: string, s: string, iv?: string | null) =>
+    req<SliceResult>(`/api/runs/${enc(id)}/ops/${enc(op)}/slice?${qs({ s, iv })}`),
+  sliceNpy: async (id: string, op: string, s: string, iv?: string | null) =>
+    (await ok(await fetch(`/api/runs/${enc(id)}/ops/${enc(op)}/slice.npy?${qs({ s, iv })}`))).blob(),
+  diff: (id: string, a: string, b: string, aIv?: string | null, bIv?: string | null) =>
+    req<DiffResult>(`/api/runs/${enc(id)}/diff?${qs({ a, b, a_iv: aIv, b_iv: bIv })}`),
+  interventions: (id: string) => req<InterventionSummary[]>(`/api/runs/${enc(id)}/interventions`),
+  intervention: (id: string, hash: string) => req<InterventionResult>(`/api/runs/${enc(id)}/interventions/${enc(hash)}`),
+  renameIntervention: (id: string, hash: string, name: string) =>
+    req<InterventionResult>(`/api/runs/${enc(id)}/interventions/${enc(hash)}`, { ...json({ name }), method: "PATCH" }),
+  deleteIntervention: (id: string, hash: string) =>
+    req<{ deleted: boolean }>(`/api/runs/${enc(id)}/interventions/${enc(hash)}`, { method: "DELETE" }),
   attribution: (id: string, body: { method: Method; target: number | null; steps: number; objective?: Objective | null }) =>
     req<Attribution>(`/api/runs/${enc(id)}/attribution`, json(body)),
   startJob: (runId: string, body: JobRequest) => req<Job>(`/api/runs/${enc(runId)}/jobs`, json(body)),

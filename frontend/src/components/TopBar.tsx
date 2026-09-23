@@ -9,11 +9,16 @@ const TABS: { tab: Tab; label: string }[] = [
   { tab: "tensors", label: "Tensors" },
   { tab: "trace", label: "Trace" },
   { tab: "lens", label: "Lens" },
+  { tab: "interventions", label: "Interventions" },
 ];
-const tabStyle: React.CSSProperties = { display: "flex", alignItems: "center", padding: "0 14px", marginBottom: -1 };
+const tabStyle: React.CSSProperties = { display: "flex", alignItems: "center", padding: "0 11px", marginBottom: -1 };
 
-export function TopBar({ run, tab, node, children }: {
-  run: RunMeta | null; tab: Tab; node?: string | null; children?: React.ReactNode;
+/** Params a tab link keeps: none to Lens; `set` (the draft) only to the tabs that compose it. */
+const linkParams = (tab: Tab, node: string | null | undefined, carry: Record<string, string | null> = {}) =>
+  tab === "lens" ? {} : { node, ...carry, ...(tab !== "graph" && tab !== "interventions" && { set: null }) };
+
+export function TopBar({ run, tab, node, carry, children }: {
+  run: RunMeta | null; tab: Tab; node?: string | null; carry?: Record<string, string | null>; children?: React.ReactNode;
 }) {
   const model = run?.model.spec?.split(":").pop() ?? run?.model.class_name ?? "";
   return (
@@ -28,18 +33,19 @@ export function TopBar({ run, tab, node, children }: {
       <span style={divider} />
       {run && (
         <div className="mono dim" title={`${model} / ${run.id} / ${run.sample.name}`}
-          style={{ display: "flex", gap: 8, whiteSpace: "nowrap", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-          <span>{model}</span><span>/</span><span>{run.id}</span><span>/</span>
-          <span style={{ color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis" }}>{run.sample.name}</span>
+          style={{ display: "flex", gap: 8, whiteSpace: "nowrap", minWidth: 76, overflow: "hidden" }}>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{model} /</span>
+          <span style={{ flexShrink: 0 }}>{run.id}</span>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>/ <span style={{ color: "var(--ink)" }}>{run.sample.name}</span></span>
         </div>
       )}
       {run && (
-        <nav style={{ alignSelf: "stretch", display: "flex", marginLeft: 16, flexShrink: 0 }} aria-label="Views">
+        <nav style={{ alignSelf: "stretch", display: "flex", marginLeft: 8, flexShrink: 0 }} aria-label="Views">
           {TABS.map((t) => t.tab === "lens" && !run.model.lm ? (
             <span key={t.tab} className="lbl" aria-disabled="true" title="Logit lens needs a causal language model"
               style={{ ...tabStyle, color: "var(--ink-2)", opacity: 0.45, borderBottom: "1.5px solid transparent" }}>{t.label}</span>
           ) : (
-            <a key={t.tab} href={href(run.id, t.tab, t.tab === "lens" ? {} : { node })} className="lbl"
+            <a key={t.tab} href={href(run.id, t.tab, linkParams(t.tab, node, carry))} className="lbl"
               aria-current={t.tab === tab ? "page" : undefined}
               style={{
                 ...tabStyle,
@@ -51,7 +57,7 @@ export function TopBar({ run, tab, node, children }: {
       )}
       <div style={{ flexGrow: 1 }} />
       {run && (
-        <span className="lbl dim" style={{ whiteSpace: "nowrap", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        <span className="lbl dim" style={{ whiteSpace: "nowrap", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", flexShrink: 100 }}>
           Fwd · {run.model.num_ops} ops · {bytes(run.model.activation_bytes)}
         </span>
       )}

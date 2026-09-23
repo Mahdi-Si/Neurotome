@@ -107,10 +107,10 @@ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.g
   inside a collapsed module opens its ancestors, selects it and centres it.
 - **Keyboard** (click or Tab into the canvas): ↓ child, ↑ parent, ←/→ siblings, `Enter` opens the
   tensor, `Escape` clears the search, `+`/`-` expand/collapse the selection.
-- **Colour**: Plain · Attr (grad × act) · Norm (RMS) · Sparsity (zero %) · NaN/Inf flag · Patch Δ, with a legend.
-- **Patch** (inspector): replace the node's output with zeros, its spatial mean, or the same node of another run
-  of this model, and re-run the forward pass. The panel shows Δlogit / Δprob of the top class; `Patch Δ` colours
-  every node by ‖after − before‖ / ‖before‖. `Trace ch →` and `Layer attribution` jump to the Trace view.
+- **Colour**: Plain · Attr (grad × act) · Norm (RMS) · Sparsity (zero %) · NaN/Inf flag · Intervention Δ, with a legend.
+- **Intervene** (inspector): add an edit of the node's output to the draft set and `Run set`; the graph then colours
+  every downstream node by ‖after − before‖ / ‖before‖ (`Intervention Δ`). `Trace ch →` and `Layer attribution` jump
+  to the Trace view.
 - **Hover** an edge for the shape it carries and any dtype/device change; the minimap (bottom left)
   pans on click or drag.
 
@@ -140,8 +140,22 @@ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.g
   neuron conductance map over the input.
 - **Method agreement**: `Compare methods` scores every pair of input methods (and per-channel methods for the
   selected node) by top-k Jaccard / overlap and Spearman rank correlation.
-- Long work (IG, layer methods, agreement, patching) runs as a background job with a progress bar and `Cancel`;
+- Long work (IG, layer methods, agreement, interventions, generation) runs as a background job with a progress bar and `Cancel`;
   results are cached in the run folder, so a repeat is instant.
+
+## Interventions
+
+- **Edit set** (Interventions tab, or the graph inspector): up to 32 edits applied in one forward pass: zero, mean
+  (over positions, or over the saved runs of this model), resample / replace from another run of the same model
+  (or a seeded random one), constant, scale ×α, and steer (+α × a contrast direction run B − run A, or a unit
+  channel). Scope each edit by channels (`0,3,7-9`) and by pixels (click the position picker) or tokens (all / last /
+  selected).
+- **Results are saved** under `runs/<id>/interventions/<hash>/` (Δ target logit / prob, top-k before / after, a
+  diff row per downstream op, the intervened tensors within the capture budget). The saved list renames and
+  deletes them; `iv=<hash>` opens a result in the graph (`Intervention Δ` colour), tensor (`Clean vs intervened`)
+  and trace views, and `set=` carries the draft, so a link shares both.
+- **Generation** (causal LMs): greedy, up to 64 tokens, clean vs intervened side by side with the per-step top-5.
+- Both backends: TorchLens edits any op (capture-time hooks); NNsight runs edit module outputs.
 
 ## Sequences and LLMs
 
@@ -157,21 +171,23 @@ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.g
 - **Token attribution**: IG, gradient × embedding or saliency on the embedding layer, one score per token (IG from a
   pad-token baseline, with its completeness Δ).
 - **NNsight backend**: `Capture` / `--backend nnsight`, or automatic above `NEUROTOME_NNSIGHT_PARAMS` (1 B)
-  parameters: a module-level graph that stays small for big models (no patching; see
+  parameters: a module-level graph that stays small for big models (interventions edit module outputs; see
   [Architecture](docs/ARCHITECTURE.md) for the trade-offs).
 
 ## Layout
 
 ```
 backend/            Python package `neurotome` (FastAPI, TorchLens, Captum)
-  neurotome/        capture.py · capture_nnsight.py · graph.py · tensors.py · slicing.py · attribution.py · lens.py · jobs.py · runs.py · errors.py · api.py · cli.py
+  neurotome/        capture.py · capture_nnsight.py · interventions.py · graph.py · tensors.py · slicing.py · attribution.py · lens.py · jobs.py · runs.py · errors.py · api.py · cli.py
   tests/            end-to-end tests (tiny model + ResNet-18)
 frontend/           Vite + React + TypeScript UI
-  e2e/              Playwright specs (home · graph · tensors · trace) and the server global setup
-  src/views/        Home · Graph · Tensors · Trace · Lens
+  e2e/              Playwright specs (home · graph · tensors · trace · text · interventions) and the server global setup
+  src/views/        Home · Graph · Tensors · Trace · Lens · Interventions
   src/components/   GraphCanvas (ELK worker, canvas edges), Minimap, GraphSearch, charts, panels,
-                    InputOverlay, ValuesTable, ComparePanel, PatchPanel, JobProgress, AgreementMatrix
-  src/lib/          pure logic: layout, viewport, graphState, tensorState, traceState, jobs, exportPng (tested with vitest)
+                    InputOverlay, ValuesTable, ComparePanel, InterventionPanel, EditForm, InterventionBanner,
+                    JobProgress, AgreementMatrix
+  src/lib/          pure logic: layout, viewport, graphState, tensorState, traceState, interventionState, composeState,
+                    jobs, exportPng (tested with vitest)
 design/             tokens.json + the canvas mockups that set the visual direction
 docs/               index.md (Getting started) · PLAN.md · ARCHITECTURE.md · DESIGN.md · RELEASE.md · specs/ (mkdocs.yml)
 examples/           quickstart.py · custom_model.py · tiny_lm.py

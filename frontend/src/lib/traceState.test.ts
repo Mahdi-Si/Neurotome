@@ -8,19 +8,19 @@ const roundTrip = (s: Partial<TraceState>) => parseTraceParams(parseHash(href("r
 describe("trace URL state", () => {
   it("omits defaults", () => {
     const s = parseTraceParams(q(""));
-    expect(s).toEqual({ node: null, m: "ig", t: null, obj: null, steps: 32, layer: null, lop: null, nc: null, go: false });
+    expect(s).toEqual({ node: null, m: "ig", t: null, obj: null, steps: 32, layer: null, lop: null, nc: null, go: false, iv: null });
     expect(Object.values(traceParams(s)).every((v) => v == null)).toBe(true);
     expect(href("r", "trace", traceParams({}))).toBe("#/runs/r/trace");
   });
   it("round-trips every field", () => {
     const s: TraceState = {
       node: "m:layer1.0:1", m: "gxa", t: 207, obj: { op: "relu_2_4", channel: 3 }, steps: 64,
-      layer: "layer_cond", lop: "relu_2_4", nc: 5, go: true,
+      layer: "layer_cond", lop: "relu_2_4", nc: 5, go: true, iv: "3f9a0c1d2e4b",
     };
     expect(roundTrip(s)).toEqual(s);
     expect(traceParams(s)).toMatchObject({ obj: "relu_2_4", ch: "3", go: "1", steps: "64", m: "gxa" });
     expect(traceParams({ node: "x", layer: "layer_ig", lop: "conv", go: true })).toEqual({
-      node: "x", m: null, t: null, obj: null, ch: null, steps: null, layer: "layer_ig", lop: "conv", nc: null, go: "1",
+      node: "x", m: null, t: null, obj: null, ch: null, steps: null, layer: "layer_ig", lop: "conv", nc: null, go: "1", iv: null,
     });
   });
   it("needs both obj and ch", () => {

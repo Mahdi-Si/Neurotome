@@ -79,9 +79,10 @@ export function Histogram({ counts, range, height = 64, highlight, exportName }:
 }
 
 /** Dot matrix: circle size encodes magnitude. Unsigned grid in [0,1]; signed grid in [-1,1]. */
-export function DotMatrix({ grid, pitch = 18, signed = false, label = "Dot matrix", exportName, onPick, mark, readout }: {
+export function DotMatrix({ grid, pitch = 18, signed = false, label = "Dot matrix", exportName, onPick, mark, readout, selected }: {
   grid: number[][]; pitch?: number; signed?: boolean; label?: string; exportName?: string;
   onPick?: (r: number, c: number) => void; mark?: Cell | null; readout?: (r: number, c: number, v: number) => string;
+  selected?: Cell[];   // cells framed by a 1px accent square (the position picker)
 }) {
   const [hover, setHover] = useState<Cell | null>(null);
   const ref = useRef<SVGSVGElement>(null);
@@ -111,6 +112,10 @@ export function DotMatrix({ grid, pitch = 18, signed = false, label = "Dot matri
             </g>
           );
         }))}
+        {selected?.map(([r, c]) => (
+          <rect key={`s${r}-${c}`} x={c * pitch + 0.5} y={r * pitch + 0.5} width={pitch - 1} height={pitch - 1}
+            fill="none" stroke={ACCENT} strokeWidth="1" pointerEvents="none" />
+        ))}
         {mark && mark[0] >= 0 && mark[0] < rows && mark[1] >= 0 && mark[1] < cols && (
           <g pointerEvents="none" fill="none" stroke={ACCENT} strokeWidth="1">
             <line x1="0" x2={cols * pitch} y1={(mark[0] + 0.5) * pitch} y2={(mark[0] + 0.5) * pitch}

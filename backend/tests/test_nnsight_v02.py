@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 from test_attention_v02 import tiny_gpt2
+from test_jobs_m3 import poll
 from test_pipeline import Tiny
 from torch import nn
 
@@ -147,14 +148,11 @@ def test_budget_and_selective(store):
         run(store, Tiny(), x, modules=["nope"])
 
 
-def test_missing_and_patch(store, monkeypatch):
+def test_missing(store, monkeypatch):
     monkeypatch.setitem(sys.modules, "nnsight", None)
     with pytest.raises(ValueError) as e:
         run(store, Tiny(), torch.randn(1, 3, 16, 16))
     assert str(e.value) == cn.MISSING
-    with pytest.raises(ValueError) as e:
-        cn.patch(Tiny(), torch.randn(1, 3, 16, 16), "fc@1", lambda t: t)
-    assert str(e.value) == cn.PATCH
 
 
 def test_trace_error(store):
@@ -200,8 +198,10 @@ def test_run_manager_backend(mgr):
     ids = {o["id"] for o in mgr.store.ir(meta["id"])["ops"]}
     assert set(res["scores"]) <= ids and "block.relu@2" in res["scores"] and res["merges"] == {}
     c = TestClient(create_app(mgr))
-    r = c.post(f"/api/runs/{meta['id']}/jobs", json={"kind": "patch", "op": "block.relu@2"})
-    assert r.status_code == 400 and r.json()["detail"] == cn.PATCH
+    body = {"kind": "intervene", "interventions": {"edits": [{"op": "block.relu@2", "kind": "zero"}]}}
+    job = poll(c, c.post(f"/api/runs/{meta['id']}/jobs", json=body).json())
+    assert job["status"] == "done", job["error"]
+    assert job["result"]["method_label"] == "Intervention · NNsight (module outputs)"
     graph = c.get(f"/api/runs/{meta['id']}/graph", params={"depth": 3, "method": "gxa"}).json()
     assert {n["output_op"] for n in graph["nodes"]} == ids
 

@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 import { CaptureBanner } from "../components/CaptureBanner";
 import { DivergingBars, DotMatrix, HeatCanvas, Histogram, LinePlot, Scatter } from "../components/charts";
-import { ComparePanel } from "../components/ComparePanel";
+import { ComparePanel, type CompareSide } from "../components/ComparePanel";
 import { Crosshair } from "../components/Icons";
 import { InputOverlay, OverlayControls } from "../components/InputOverlay";
+import { InterventionBanner } from "../components/InterventionBanner";
 import { TopBar } from "../components/TopBar";
 import { ValuesTable } from "../components/ValuesTable";
 import { api } from "../lib/api";
@@ -40,10 +41,15 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
       ?? nodes.find((n) => n.shape.length === 4 && !n.is_input) ?? nodes[0] ?? null,
     [nodes, s.node, missing]);
   const cmp = s.cmp ? nodes.find((n) => n.id === s.cmp) ?? null : null;
+  const ivRes = useAsync(() => (s.iv ? api.intervention(run.id, s.iv) : null), [run.id, s.iv]);
+  const ivResult = ivRes.data?.hash === s.iv ? ivRes.data : null;
+  // the graph is the clean one (node list, clean stats); a side under the intervention takes its stats from the result
+  const side = (n: GraphNode, iv: string | null, tag: string): CompareSide =>
+    ({ node: n, iv, stats: (iv && ivResult?.stats[n.output_op]) || n.stats, tag });
   const tensor = useAsync(
-    () => (node ? api.tensor(run.id, node.output_op, { channel: s.c, py: s.py, px: s.px, norm: s.norm, cmap: s.cmap })
+    () => (node ? api.tensor(run.id, node.output_op, { channel: s.c, py: s.py, px: s.px, norm: s.norm, cmap: s.cmap, iv: s.iv })
       .then((v) => [node.output_op, v] as const) : null),
-    [run.id, node?.output_op, s.c, s.py, s.px, s.norm, s.cmap]);
+    [run.id, node?.output_op, s.c, s.py, s.px, s.norm, s.cmap, s.iv]);
   // the op travels with its view: while the next node loads, the stale view keeps its own op (the values table fetches by it)
   const [tOp, t] = tensor.data ?? [null, null];
 
@@ -52,14 +58,16 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const toggleCompare = () => {
     if (cmp || !node) return go({ cmp: null });
     const par = graph.data && parentNode(graph.data, node.id);   // only nodes with a saved tensor can be compared
-    go({ cmp: nodes.some((n) => n.id === par) ? par : nodes.find((n) => n.id !== node.id)?.id ?? null });
+    go({ cmp: nodes.some((n) => n.id === par) ? par : nodes.find((n) => n.id !== node.id)?.id ?? null, vs: null });
   };
   const pixel = t?.kind === "image" ? t.vector.pixel : null;
 
   return (
     <>
-      <TopBar run={run} tab="tensors" node={missing?.id ?? node?.id} />
+      <TopBar run={run} tab="tensors" node={missing?.id ?? node?.id} carry={{ iv: s.iv }} />
       <CaptureBanner run={run} />
+      <InterventionBanner result={ivResult} error={s.iv ? ivRes.error : null}
+        clearHref={href(run.id, "tensors", tensorParams({ ...s, node: missing?.id ?? node?.id ?? null, iv: null, vs: null }))} />
       <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
         <aside style={{ width: 300, flexShrink: 0, borderRight: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 20 }} className="scroll">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -73,6 +81,10 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
             <button type="button" className="btn" aria-pressed={!!cmp} onClick={toggleCompare} disabled={nodes.length < 2}>
               {cmp ? "Exit compare" : "Compare"}
             </button>
+            {s.iv && (
+              <button type="button" className={s.vs ? "btn solid" : "btn"} aria-pressed={!!s.vs} disabled={!node}
+                onClick={() => go({ vs: s.vs ? null : "clean", cmp: null })}>Clean vs intervened</button>
+            )}
             {cmp && node && (
               <>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
@@ -145,8 +157,9 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
           )}
           <span className="lbl dim" style={{ marginTop: "auto" }}>Full shape {shape(t?.shape)}</span>
         </aside>
-        {cmp && node ? (
-          <ComparePanel run={run} a={node} b={cmp} channel={s.c ?? (t?.kind === "image" ? t.channel : null)}
+        {node && (s.vs || cmp) ? (
+          <ComparePanel run={run} a={s.vs ? side(node, null, "A · clean") : side(node, s.iv, "A")}
+            b={s.vs ? side(node, s.iv, "B · intervened") : side(cmp!, s.iv, "B")} channel={s.c ?? (t?.kind === "image" ? t.channel : null)}
             pixel={s.py != null && s.px != null ? [s.py, s.px] : pixel} norm={s.norm} cmap={s.cmap} onPixel={(py, px) => go({ py, px })} />
         ) : (
           <>
@@ -161,7 +174,7 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
             {tensor.error && <div className="empty err">{tensor.error}</div>}
             {!missing && !graph.error && !t && !tensor.error && <div className="empty lbl">{tensor.loading || graph.loading ? "Loading tensor…" : "No tensor saved for this node"}</div>}
             {t && tOp && (
-              <TensorBody run={run} op={tOp} t={t} onChannel={(c) => go({ c })} onPixel={(py, px) => go({ py, px })} />
+              <TensorBody run={run} op={tOp} iv={s.iv} t={t} onChannel={(c) => go({ c })} onPixel={(py, px) => go({ py, px })} />
             )}
           </>
         )}
@@ -187,9 +200,9 @@ interface BodyProps<V> { run: RunMeta; op: string; t: V; onChannel: (c: number) 
 const exName = (run: RunMeta, op: string, c: number | null, chart: string) =>
   fileName([run.id, op, c == null ? null : "c" + c, chart], "png").slice(0, -4);
 
-function TensorBody(p: BodyProps<TensorView>) {
+function TensorBody({ iv, ...p }: BodyProps<TensorView> & { iv: string | null }) {
   const { t } = p;
-  const values = <ValuesTable key={p.op} runId={p.run.id} op={p.op} shape={t.shape}
+  const values = <ValuesTable key={`${p.op}|${iv}`} runId={p.run.id} op={p.op} shape={t.shape} iv={iv}
     initial={defaultSlice(t.shape, t.kind === "image" ? { channel: t.channel, pixel: t.vector.pixel } : {})} />;
   if (t.kind === "image") return <ImageBody {...p} t={t} values={values} />;
   if (t.kind === "sequence") return <SequenceBody {...p} t={t} values={values} />;

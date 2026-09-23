@@ -1,37 +1,40 @@
-// Compare mode: two nodes side by side on a shared scale, plus element-wise Δ = B − A statistics.
+// Compare mode: two nodes (or one node clean vs intervened) side by side on a shared scale, plus element-wise Δ = B − A statistics.
 import { api } from "../lib/api";
 import { headReadout } from "../lib/attentionState";
 import { fileName } from "../lib/exportPng";
 import { displayName, num, pct, shapeShort } from "../lib/format";
 import { cellOf, cellPixel, cellSpan, sameShape, sharedRange, unscale } from "../lib/tensorState";
-import type { Cmap, GraphNode, Norm, RunMeta, TensorView } from "../lib/types";
+import type { Cmap, GraphNode, Norm, RunMeta, Stats, TensorView } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
 import { DivergingBars, DotMatrix, HeatCanvas, Histogram, LinePlot } from "./charts";
 
+/** One side: a node's tensor, clean (iv null) or under an intervention, with the stats that go with it. */
+export interface CompareSide { node: GraphNode; iv: string | null; stats: Stats | null; tag: string }
+
 export function ComparePanel({ run, a, b, channel, pixel, norm, cmap, onPixel }: {
-  run: RunMeta; a: GraphNode; b: GraphNode;
+  run: RunMeta; a: CompareSide; b: CompareSide;
   channel: number | null; pixel: [number, number] | null; norm: Norm; cmap: Cmap;
   onPixel: (py: number, px: number) => void;
 }) {
-  const range = sameShape(a.shape, b.shape) ? sharedRange(a.stats, b.stats) : null;
+  const range = sameShape(a.node.shape, b.node.shape) ? sharedRange(a.stats, b.stats) : null;
   const opts = { channel, py: pixel?.[0] ?? null, px: pixel?.[1] ?? null, cmap, ...(range ? { norm: "global" as const, lo: range[0], hi: range[1] } : { norm }) };
   const deps = [run.id, channel, pixel?.[0], pixel?.[1], norm, cmap, range?.[0], range?.[1]];
-  const ta = useAsync(() => api.tensor(run.id, a.output_op, opts), [a.output_op, ...deps]);
-  const tb = useAsync(() => api.tensor(run.id, b.output_op, opts), [b.output_op, ...deps]);
-  const diff = useAsync(() => api.diff(run.id, a.output_op, b.output_op), [run.id, a.output_op, b.output_op]);
+  const ta = useAsync(() => api.tensor(run.id, a.node.output_op, { ...opts, iv: a.iv }), [a.node.output_op, a.iv, ...deps]);
+  const tb = useAsync(() => api.tensor(run.id, b.node.output_op, { ...opts, iv: b.iv }), [b.node.output_op, b.iv, ...deps]);
+  const diff = useAsync(() => api.diff(run.id, a.node.output_op, b.node.output_op, a.iv, b.iv), [run.id, a.node.output_op, b.node.output_op, a.iv, b.iv]);
   const d = diff.data?.diff;
-  const ex = (op: string, chart: string) => fileName([run.id, op, channel == null ? null : "c" + channel, chart], "png").slice(0, -4);
+  const ex = (s: CompareSide, chart: string) => fileName([run.id, s.iv, s.node.output_op, channel == null ? null : "c" + channel, chart], "png").slice(0, -4);
   const col: React.CSSProperties = { padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12, minWidth: 0 };
 
   return (
     <section className="scroll" style={{ flexGrow: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
       <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--line)", display: "flex", justifyContent: "space-between", gap: 12 }}>
         <span className="lbl">Compare</span>
-        <span className="lbl dim">{range ? `Shared scale · ${num(range[0])} … ${num(range[1])}` : `Scales differ · shapes ${shapeShort(a.shape)} vs ${shapeShort(b.shape)}`}</span>
+        <span className="lbl dim">{range ? `Shared scale · ${num(range[0])} … ${num(range[1])}` : `Scales differ · shapes ${shapeShort(a.node.shape)} vs ${shapeShort(b.node.shape)}`}</span>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", flexGrow: 1 }}>
-        <Side tag="A" node={a} t={ta.data} error={ta.error} range={range} onPixel={onPixel} ex={(c) => ex(a.output_op, c)} style={col} />
-        <Side tag="B" node={b} t={tb.data} error={tb.error} range={range} onPixel={onPixel} ex={(c) => ex(b.output_op, c)} style={{ ...col, borderLeft: "1px solid var(--line)" }} />
+        <Side side={a} t={ta.data} error={ta.error} range={range} onPixel={onPixel} ex={(c) => ex(a, c)} style={col} />
+        <Side side={b} t={tb.data} error={tb.error} range={range} onPixel={onPixel} ex={(c) => ex(b, c)} style={{ ...col, borderLeft: "1px solid var(--line)" }} />
         <div style={{ ...col, borderLeft: "1px solid var(--line)" }}>
           <span className="lbl">Δ = B − A</span>
           {diff.error && <span className="err mono">{diff.error}</span>}
@@ -51,7 +54,7 @@ export function ComparePanel({ run, a, b, channel, pixel, norm, cmap, onPixel }:
                 ))}
               </div>
               <span className="lbl">Δ distribution</span>
-              <Histogram counts={d.hist.counts} range={d.hist.range} height={70} exportName={fileName([run.id, a.output_op, b.output_op, "delta-hist"], "png").slice(0, -4)} />
+              <Histogram counts={d.hist.counts} range={d.hist.range} height={70} exportName={fileName([run.id, a.node.output_op, b.node.output_op, b.iv ?? a.iv, "delta-hist"], "png").slice(0, -4)} />
             </>
           )}
         </div>
@@ -60,11 +63,10 @@ export function ComparePanel({ run, a, b, channel, pixel, norm, cmap, onPixel }:
   );
 }
 
-function Side({ tag, node, t, error, range, onPixel, ex, style }: {
-  tag: string; node: GraphNode; t: TensorView | null; error: string | null; range: [number, number] | null;
+function Side({ side: { tag, node, stats: st }, t, error, range, onPixel, ex, style }: {
+  side: CompareSide; t: TensorView | null; error: string | null; range: [number, number] | null;
   onPixel: (py: number, px: number) => void; ex: (chart: string) => string; style: React.CSSProperties;
 }) {
-  const st = node.stats;
   return (
     <div style={style}>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

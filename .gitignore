@@ -32,3 +32,4 @@ runs/
 *.tsbuildinfo
 .playwright-mcp/
 .serena/
+*.stackdump

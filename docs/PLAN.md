@@ -24,7 +24,7 @@ is the product that ties them together behind a good UI.
 | Gradients for every op in one backward pass | TorchLens `save_grads` + `log_backward` | Used for node and edge attribution |
 | Input attribution (IG, saliency, grad×input) | **Captum** | Used |
 | Hierarchical graph layout | **ELK** (elkjs) | Used |
-| Interventions and patching | TorchLens interventions / **NNsight** | Roadmap (v0.3) |
+| Interventions and patching | TorchLens interventions / **NNsight** | Used (v0.3) |
 | LLM-scale execution | **NNsight** (+ NDIF for remote) | NNsight capture backend used at module level (v0.2); NDIF remote execution still v0.4 |
 | Hugging Face models and tokenizers | **transformers** (optional `hf` extra) | Used (v0.2) |
 
@@ -184,7 +184,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 | Release | Theme | Highlights |
 |---|---|---|
 | **v0.2 (delivered, spec: docs/specs/v02.md)** | Sequences and LLMs | Token input box; Hugging Face models; attention-pattern viewer; logit lens; LayerIntegratedGradients on embeddings; NNsight capture backend for large models |
-| v0.3 | Interventions | Zero/mean/resample ablation, activation patching and steering from the UI; before/after diff of every downstream node |
+| **v0.3 (delivered, spec: docs/specs/v03.md)** | Interventions | Zero/mean/resample ablation, activation patching and steering from the UI; before/after diff of every downstream node |
 | v0.4 | Scale | Streaming capture to chunked storage (zarr); selective capture during the trace (M4 selects what reaches disk); remote GPU server; optional NDIF backend for very large models |
 | v0.5 | Comparison | Two samples or two checkpoints side by side; dataset-level channel statistics; float vs quantized error overlay |
 | v1.0 | Ecosystem | Jupyter widget; plugin API for custom tensor viewers and attribution methods; static shareable export; circuit-tracer import |
@@ -221,6 +221,41 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
   scores, patch refused (400). `hf:google/vit-base-patch16-224` DEFAULT on `grace_hopper.jpg`: 370 ops in 11 s,
   top-1 `military uniform` 0.89, 36 attention views (12 heads × 197 tokens). `torchvision:resnet18` 3 s,
   `torchvision:vit_b_16` 3.6 s (SDPA, no attention views)
+
+### v0.3 · Interventions (delivered)
+
+- [x] **Ablation**: edit kinds zero, mean (over positions, or over the saved runs of the same model), constant and
+  scale, scoped by channels and by pixels `[y, x]` or token positions (`"last"` included); a set of up to 32 edits
+  runs in one forward pass and is saved under its hash
+- [x] **Activation patching**: replace an op's output with the same op of another run of this model (or a random
+  one, seeded), in place of the M3 `patch` job
+- [x] **Steering**: `x + α·v` with a contrast direction (pooled run B − run A) or a unit channel, plus greedy
+  generation of up to 64 tokens, clean vs intervened, with the per-step top-5
+- [x] **From the UI**: an Interventions tab (compose a set, run it, saved list with rename / delete, generation) and
+  an Intervene section in the graph inspector; URL state `iv` / `set`
+- [x] **Before/after diff of every downstream node**: ‖Δ‖, relative Δ, cosine and max |Δ| per downstream op (the
+  `Intervention Δ` colour mode), intervened stats on the graph, clean vs intervened tensors in the Tensor view
+- [x] **Saved interventions**: `runs/<id>/interventions/<hash>/` holds the result, the downstream tensors under the
+  run's capture budget (never crossed) and generation results; old runs open with an empty list
+- [x] v0.3 notes: TorchLens DAG **replay stops at multi-pass ops** (GPT-2's residual adds are two passes of one
+  layer), so M3's replay patch was silently wrong on HF LMs; v0.3 re-traces with **capture-time hooks** matched on
+  `raw_index` (one clean and one edited trace) and checks the result against forward hooks. Eval-mode **dropout** (an
+  op that returns its input object) cannot be edited under TorchLens; the message names the parent op to edit
+  instead. NNsight edits leaf-module calls natively (`env.output = fn(env.output)`); the k-th call of a module is
+  `tracer.iter[k − 1]`, and every edit runs inside its own `iter` block, because NNsight's per-module call counter
+  only counts while an `iter` is open (a plain first edit followed by an `iter` one misses the call). "Mean over
+  runs" is the **dataset-free batch mean**: the runs on disk of the same spec and weights are the batch. Generation is
+  greedy, at most 64 tokens, **no KV cache** (every step re-runs the sequence, so `"last"` follows it) and applies
+  the edits as forward hooks on module outputs (zero, mean over positions, constant, scale and steer only). The M3
+  `patch` job, its `baseline` / `source_run` fields, the `patch/` cache and the `patch` / `pb` / `psrc` URLs are
+  replaced (old cache files are ignored). Found in the integration smoke test (CUDA): `intervene` runs with grad
+  enabled, as the capture did, because under `no_grad` `nn.MultiheadAttention` / `TransformerEncoderLayer` take their
+  fused fast path and the op ids no longer match the IR (ViT-B/16 answered `Unknown op`); replacement tensors are
+  materialised (never an expanded view or the cached source value), so an in-place op after the edit (ResNet's
+  `out += identity`) works. Generation hooks edit the first tensor of a tuple, dict or HF `ModelOutput` (GPT-2's
+  `transformer` node) and raise when an output holds none, never skipping an edit silently; an edit that overflows
+  gives null logits / probs and each node counts the values that became or stopped being NaN / inf (`nonfinite`, a
+  maximal Δ in the colour mode)
 
 ## 9. Risks and mitigations
 

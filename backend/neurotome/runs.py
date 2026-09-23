@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
 import math
+import random
+import shutil
 import threading
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -31,6 +34,18 @@ from .attribution import (
 from .capture import capture
 from .errors import ModelUnavailable, describe
 from .graph import module_calls, module_site, module_sites
+from .interventions import (
+    CH_AXIS,
+    GEN_KINDS,
+    MAX_NEW_TOKENS,
+    downstream,
+    edit_fn,
+    keep_ops,
+    label,
+    normalise,
+    set_hash,
+)
+from .interventions import generate as generate_tokens
 from .jobs import Cancelled, Job, JobRunner, Progress
 from .lens import logit_lens
 from .models import (
@@ -248,7 +263,7 @@ class RunManager:
         return "torchlens"
 
     def _backend(self, run_id: str) -> Any:
-        """The capture module that recorded this run (op_gradients and patch must match its op ids)."""
+        """The capture module that recorded this run (op_gradients and intervene must match its op ids)."""
         return _module(self.store.meta(run_id)["model"].get("backend") or "torchlens")
 
     def delete(self, run_id: str) -> None:
@@ -523,75 +538,287 @@ class RunManager:
         self.store.write_json(run_id, name, result)
         return result
 
-    def patch(
-        self,
-        run_id: str,
-        op: str,
-        baseline: str,
-        source_run: str | None = None,
-        target: int | None = None,
-        progress: Progress | None = None,
-    ) -> dict[str, Any]:
-        """Replace one op's output (zeros, its spatial mean, or the same op of another run of this model)
-        and replay the forward pass."""
-        name = cache_name("patch", None, target, None, 0, op, baseline=baseline, source_run=source_run)
+    # ---- interventions (v0.3) ---------------------------------------------
+    def _source(self, run_id: str, src: str, op: str, shape: list[int] | None = None) -> np.ndarray:
+        """``src``'s saved tensor of ``op`` after the source-run checks (same model spec and weights)."""
+        if not self.store.exists(src):
+            raise ValueError(f"Source run {src} not found")
+        mine, theirs = (self.store.meta(r)["model"] for r in (run_id, src))
+        if src != run_id and (mine.get("spec") is None or _model_key(mine) != _model_key(theirs)):
+            raise ValueError(
+                f"{src} is a run of another model ({theirs.get('spec')} · {theirs.get('weights')}); "
+                "use a run with the same model spec and weights"
+            )
+        try:
+            arr = np.array(self.store.load_tensor(src, op))
+        except KeyError:
+            raise ValueError(f"{src} has no saved tensor for {op}") from None
+        if shape is not None and list(arr.shape) != list(shape):
+            raise ValueError(f"{src}'s {op} has shape {list(arr.shape)}, this run's {list(shape)}")
+        return arr
+
+    def _peers(self, run_id: str, op: str, shape: list[int]) -> list[str]:
+        """Runs of this model (this one included) with a saved ``op`` tensor of ``shape``, sorted."""
+        mine = self.store.meta(run_id)["model"]
+        out = []
+        for meta in self.store.list_runs():
+            if meta["id"] != run_id and (
+                mine.get("spec") is None or _model_key(meta["model"]) != _model_key(mine)
+            ):
+                continue
+            path = self.store.tensor_path(meta["id"], op)
+            if path.exists() and list(np.load(path, mmap_mode="r").shape) == list(shape):
+                out.append(meta["id"])
+        return sorted(out)
+
+    def resolve(
+        self, run_id: str, norm: dict[str, Any]
+    ) -> list[tuple[np.ndarray | None, str | None, int | None]]:
+        """Per edit (value, resolved source run, runs averaged): the replacement or steer vector read from the
+        store, after the source-run checks of spec §1.3 (400 at POST)."""
+        shapes = {o["id"]: o["shape"] for o in self.store.ir(run_id)["ops"]}
+        out: list[tuple[np.ndarray | None, str | None, int | None]] = []
+        for e in norm["edits"]:
+            op, kind = e["op"], e["kind"]
+            shape = shapes[op]
+            if kind == "resample" and e["source_run"] == "random":
+                peers = [r for r in self._peers(run_id, op, shape) if r != run_id]
+                if not peers:
+                    raise ValueError(f"No other run of this model has a saved tensor for {op}")
+                src = random.Random(e["seed"]).choice(peers)
+                out.append((self._source(run_id, src, op, shape), src, None))
+            elif kind == "resample":
+                out.append((self._source(run_id, e["source_run"], op, shape), e["source_run"], None))
+            elif kind == "mean" and e["over"] == "runs":
+                peers = self._peers(run_id, op, shape)
+                if len(peers) < 2:
+                    raise ValueError(
+                        f"Mean over runs needs another saved run of this model with a tensor for {op}"
+                    )
+                total = np.zeros(shape)
+                for r in peers:
+                    total += self.store.load_tensor(r, op)
+                out.append(((total / len(peers)).astype(np.float32), None, len(peers)))
+            elif kind == "steer" and e["direction"]["kind"] == "contrast":
+                d, n = e["direction"], shape[CH_AXIS[len(shape)]]
+                va, vb = (_pool(self._source(run_id, d[k], op), d["pool"]) for k in ("run_a", "run_b"))
+                if not len(va) == len(vb) == n:
+                    raise ValueError(f"Contrast runs have {len(va)} and {len(vb)} channels at {op}")
+                out.append(((vb - va).astype(np.float32), None, None))
+            else:
+                out.append((None, None, None))
+        return out
+
+    def _labels(self, ir: dict[str, Any], norm: dict[str, Any], resolved: list) -> list[str]:
+        return [
+            label(e, _path(ir, e["op"]), src, n)
+            for e, (_, src, n) in zip(norm["edits"], resolved, strict=True)
+        ]
+
+    def intervene(self, run_id: str, norm: dict[str, Any], resolved: list | None = None,
+                  progress: Progress | None = None) -> dict[str, Any]:  # fmt: skip
+        """Run a normalised intervention set (one forward pass), save the downstream tensors under its hash
+        and return the InterventionResult (cached in ``interventions/<hash>/meta.json``)."""
+        h = set_hash(norm)
+        name = f"interventions/{h}/meta.json"
         if (cached := self._cached(run_id, name)) is not None:
             return cached
         report = progress or _quiet
-        if baseline == "run":
-            model, src_id = self.store.meta(run_id)["model"], source_run or ""
-            other = self.store.meta(src_id)["model"] if self.store.exists(src_id) else {}
-            same = [(m.get("spec"), m.get("weights")) for m in (model, other)]
-            if source_run == run_id or model.get("spec") is None or same[0] != same[1]:
-                raise ValueError("source run must be a different run with the same model spec and weights")
-            try:
-                src = np.array(self.store.load_tensor(src_id, op))
-            except KeyError as e:
-                raise ValueError(f"source run has no saved tensor for {op}") from e
-            replace = lambda t: torch.as_tensor(src, dtype=t.dtype, device=t.device)  # noqa: E731
-        elif baseline == "mean":
-            replace = _spatial_mean
-        elif baseline == "zeros":
-            replace = torch.zeros_like
-        else:
-            raise ValueError("baseline must be zeros, mean or run")
+        resolved = self.resolve(run_id, norm) if resolved is None else resolved
+        ir = self.store.ir(run_id)
+        ops = {e["op"] for e in norm["edits"]}
+        edited = [o["id"] for o in ir["ops"] if o["id"] in ops]
+        down = downstream(ir, edited)
+        budget = ir["model"].get("budget_bytes") or self.max_capture_bytes
+        saved, truncated = keep_ops(ir, down, budget)
+        edits = [(e["op"], edit_fn(e, v)) for e, (v, _, _) in zip(norm["edits"], resolved, strict=True)]
+        backend = self.store.meta(run_id)["model"].get("backend") or "torchlens"
         with self._lock:
             live = self.live(run_id)
-            ir = self.store.ir(run_id)
-            if not any(o["id"] == op for o in ir["ops"]):
-                raise ValueError(f"Unknown op {op}")
             model = live.loaded.model.eval()
             report(0.05, "Clean pass")
-            with torch.no_grad():
-                args = live.inputs if isinstance(live.inputs, (tuple, list)) else (live.inputs,)
-                logits = to_logits(model(*args))[0].float()
-            t = int(logits.argmax()) if target is None else target
-            report(0.3, "Patched replay")
-            out = self._backend(run_id).patch(model, live.inputs, op, replace)
-            after = to_logits(out["logits_after"])[0].float()
+            # grad mode as at capture: under no_grad nn.MultiheadAttention takes its fused path (other op ids)
+            logits = to_logits(model(*_args(live.inputs)))[0].detach().float()
+            t = int(logits.argmax()) if norm["target"] is None else norm["target"]
+            if not 0 <= t < logits.numel():
+                raise ValueError(f"Target {t} is outside the output (0–{logits.numel() - 1})")
+            report(0.15, "Intervene")
+            out = self._backend(run_id).intervene(model, live.inputs, edits, down, saved)
+            after = to_logits(out["logits_after"])[0].detach().float()
+        kept = [op for op in saved if op in out["after"]]
+        nbytes = 0
+        for i, op in enumerate(kept, start=1):
+            report(0.8 + 0.19 * i / len(kept), f"Save tensors {i}/{len(kept)}")
+            self.store.save_tensor(run_id, op, out["after"][op], iv=h)
+            nbytes += out["after"][op].nbytes
         cats = live.loaded.categories
         p0, p1 = torch.softmax(logits, 0), torch.softmax(after, 0)
-        before_ = {"logit": float(logits[t]), "prob": float(p0[t])}
-        after_ = {"logit": float(after[t]), "prob": float(p1[t])}
-        site = module_site(ir, op)
+        before_ = {"logit": _fin(logits[t]), "prob": _fin(p0[t])}
+        after_ = {"logit": _fin(after[t]), "prob": _fin(p1[t])}
+        delta = {k: None if (a := after_[k]) is None or (b := before_[k]) is None else a - b for k in before_}
+        labels = self._labels(ir, norm, resolved)
         result = {
-            "op": op,
-            "path": site[0] if site else op,
-            "baseline": baseline,
-            "source_run": source_run if baseline == "run" else None,
-            "method_label": "Activation patching · TorchLens replay",
+            "hash": h,
+            "run_id": run_id,
+            "name": labels[0] + (f" (+{len(labels) - 1})" if len(labels) > 1 else ""),
+            "created": self.store.now(),
+            "set": norm,
+            "labels": labels,
+            "method_label": IV_LABELS.get(backend, IV_LABELS["torchlens"]),
             "target": t,
             "target_label": cats[t] if cats and t < len(cats) else None,
             "before": before_,
             "after": after_,
-            "delta_logit": after_["logit"] - before_["logit"],
-            "delta_prob": after_["prob"] - before_["prob"],
+            "delta_logit": delta["logit"],
+            "delta_prob": delta["prob"],
+            "top_before": _top_of(logits, cats),
             "top_after": _top_of(after, cats),
-            "deltas": out["deltas"],
-            "rel": out["rel"],
+            "edited": edited,
+            "downstream": down,
+            "saved": kept,
+            "truncated": truncated,
+            "budget_bytes": budget,
+            "bytes": nbytes,
+            "nodes": out["nodes"],
+            "stats": out["stats"],
         }
         self.store.write_json(run_id, name, result)
         return result
+
+    @staticmethod
+    def _gen_sites(meta: dict[str, Any], ir: dict[str, Any], norm: dict[str, Any]) -> list[tuple[str, int]]:
+        """The (module, call) of every edit, after the generation checks that need no model."""
+        if not meta["model"].get("lm"):
+            raise ValueError(NOT_LM_GEN)
+        if not meta["sample"].get("token_ids"):
+            raise ValueError("Generation needs token ids as input")
+        sites = []
+        for e in norm["edits"]:
+            op, kind = e["op"], e["kind"]
+            if kind not in GEN_KINDS and not (kind == "mean" and e["over"] == "positions"):
+                what = "mean over runs" if kind == "mean" else kind
+                raise ValueError(
+                    f"Generation supports zero, mean over positions, constant, scale and steer edits "
+                    f"({what} values have the prompt's length)"
+                )
+            site = module_site(ir, op)
+            if site is None:
+                raise ValueError(
+                    f"Generation edits {op} through a forward hook on its module; {op} is not the "
+                    "output of a module (pick its module node)"
+                )
+            sites.append(site)
+        return sites
+
+    def generate(self, run_id: str, norm: dict[str, Any], n: int, resolved: list | None = None,
+                 progress: Progress | None = None) -> dict[str, Any]:  # fmt: skip
+        """Greedy continuations of the run's prompt, clean and with the set's edits as forward hooks
+        (GenerationResult, cached in ``interventions/<hash>/generate_<n>.json``)."""
+        h = set_hash(norm)
+        name = f"interventions/{h}/generate_{n}.json"
+        if (cached := self._cached(run_id, name)) is not None:
+            return cached
+        meta, ir = self.store.meta(run_id), self.store.ir(run_id)
+        sites = self._gen_sites(meta, ir, norm)
+        if not 1 <= n <= MAX_NEW_TOKENS:
+            raise ValueError(f"max_new_tokens must be between 1 and {MAX_NEW_TOKENS}")
+        resolved = self.resolve(run_id, norm) if resolved is None else resolved
+        hooks = [(s, edit_fn(e, v)) for s, e, (v, _, _) in zip(sites, norm["edits"], resolved, strict=True)]
+        with self._lock:
+            live = self.live(run_id)
+            model = live.loaded.model.eval()
+            x = _first(live.inputs)
+            cfg = getattr(model, "config", None)
+            limit = getattr(cfg, "n_positions", 0) or getattr(cfg, "max_position_embeddings", 0)
+            if limit and x.shape[-1] + n > limit:
+                raise ValueError(
+                    f"The prompt ({x.shape[-1]} tokens) plus {n} new tokens exceeds the model's "
+                    f"{limit} positions"
+                )
+            res = generate_tokens(model, x, hooks, n, live.loaded.tokenizer, progress)
+        result = {
+            "hash": h,
+            "n": n,
+            "labels": self._labels(ir, norm, resolved),
+            "method_label": f"Greedy decoding · {n} new tokens · edits as forward hooks on module outputs · "
+            "no KV cache",  # fmt: skip
+            "prompt": meta["sample"].get("tokens") or [],
+            **res,
+        }
+        self.store.write_json(run_id, name, result)
+        return result
+
+    def interventions(self, run_id: str) -> list[dict[str, Any]]:
+        """InterventionSummary rows, newest first (folders without meta.json are generate-only: skipped)."""
+        root = self.store.run_dir(run_id) / "interventions"
+        rows = [json.loads(p.read_text()) for p in sorted(root.glob("*/meta.json"))] if root.is_dir() else []
+        return sorted(
+            ({k: r.get(k) for k in SUMMARY} for r in rows), key=lambda r: r["created"] or 0, reverse=True
+        )
+
+    def intervention(self, run_id: str, h: str) -> dict[str, Any]:
+        try:
+            self.store.iv_dir(run_id, h)
+            return self.store.read_json(run_id, f"interventions/{h}/meta.json")
+        except KeyError:
+            raise NotFound(f"Intervention {h} not found in {run_id}") from None
+
+    def rename(self, run_id: str, h: str, name: str) -> dict[str, Any]:
+        name = name.strip()
+        if not name:
+            raise ValueError("Name cannot be empty")
+        res = self.intervention(run_id, h) | {"name": name[:80]}
+        self.store.write_json(run_id, f"interventions/{h}/meta.json", res)
+        return res
+
+    def delete_intervention(self, run_id: str, h: str) -> None:
+        self.intervention(run_id, h)
+        shutil.rmtree(self.store.iv_dir(run_id, h), ignore_errors=True)
+
+    def iv_tensor(self, run_id: str, h: str, op: str) -> np.ndarray:
+        """``op``'s tensor under intervention ``h``: intervened when saved, clean when not downstream
+        (identical), else NotFound with the reason; a clean miss is the store's plain KeyError."""
+        res = self.intervention(run_id, h)
+        if op in res["saved"]:
+            return self.store.load_tensor(run_id, op, iv=h)
+        if op not in res["downstream"]:
+            return self.store.load_tensor(run_id, op)
+        o = next((o for o in self.store.ir(run_id)["ops"] if o["id"] == op), {})
+        if o.get("saved") and "float" in (o.get("dtype") or ""):
+            mb = (res.get("budget_bytes") or 0) / 2**20
+            why = f"the capture budget ({mb:g} MB) was reached before it; the graph still shows its Δ"
+        else:
+            why = "the clean run saved no tensor for it"
+        raise NotFound(f"No intervened tensor saved for {op}: {why}")
+
+    def iv_ir(self, run_id: str, h: str) -> dict[str, Any]:
+        """The IR with the intervened stats of ``h`` (for ``/graph?iv=``)."""
+        stats = self.intervention(run_id, h)["stats"]
+        ir = self.store.ir(run_id)
+        for o in ir["ops"]:
+            o["stats"] = stats.get(o["id"], o.get("stats"))
+        return ir
+
+    def _iv_job(self, run_id: str, kind: str, req: dict[str, Any]) -> Job:
+        raw = req.get("interventions")
+        if not raw:
+            raise ValueError(f"{kind} jobs need interventions")
+        meta, ir = self.store.meta(run_id), self.store.ir(run_id)
+        norm = normalise(raw, ir)
+        n = int(req.get("max_new_tokens") or 16)
+        if kind == "generate":
+            if not 1 <= n <= MAX_NEW_TOKENS:
+                raise ValueError(f"max_new_tokens must be between 1 and {MAX_NEW_TOKENS}")
+            self._gen_sites(meta, ir, norm)
+        name = f"interventions/{set_hash(norm)}/{f'generate_{n}' if kind == 'generate' else 'meta'}.json"
+        if (cached := self._cached(run_id, name)) is not None:
+            return self.jobs.finished(kind, cached, run_id)
+        resolved = self.resolve(run_id, norm)
+        if kind == "generate":
+            fn = lambda p: self.generate(run_id, norm, n, resolved, p)  # noqa: E731
+        else:
+            fn = lambda p: self.intervene(run_id, norm, resolved, p)  # noqa: E731
+        return self.jobs.submit(kind, fn, run_id, key=name)
 
     def lens(self, run_id: str, target: int | None, progress: Progress | None = None) -> dict[str, Any]:
         """Logit lens (``lens.logit_lens``) of an LM run; ``target`` None = the top prediction."""
@@ -634,14 +861,8 @@ class RunManager:
         elif kind == "agreement":
             name = cache_name(kind, None, target, obj, steps, op)
             fn = lambda p: self.agreement(run_id, target, steps, obj, op, p)  # noqa: E731
-        elif kind == "patch":
-            baseline, source = req.get("baseline") or "zeros", req.get("source_run")
-            if not op or (baseline == "run" and not source):
-                raise ValueError("patch jobs need op, and source_run when baseline is run")
-            if meta["model"].get("backend") == "nnsight":
-                self._backend(run_id).patch()  # raises its ValueError: no recorded DAG to replay
-            name = cache_name(kind, None, target, None, 0, op, baseline=baseline, source_run=source)
-            fn = lambda p: self.patch(run_id, op, baseline, source, target, p)  # noqa: E731
+        elif kind in ("intervene", "generate"):
+            return self._iv_job(run_id, kind, req)
         elif kind == "lens":
             if not meta["model"].get("lm"):
                 raise ValueError(NOT_LM)
@@ -656,6 +877,26 @@ class RunManager:
 
 UNIT_WHY = "unit objectives hook module outputs"
 NOT_LM = "Logit lens needs a causal language model with a tokenizer; this run's model is not one."
+NOT_LM_GEN = "Generation needs a causal language model with a tokenizer; this run's model is not one."
+IV_LABELS = {"torchlens": "Intervention · TorchLens capture-time hooks (every op)",
+             "nnsight": "Intervention · NNsight (module outputs)"}  # fmt: skip
+SUMMARY = (
+    "hash",
+    "name",
+    "created",
+    "labels",
+    "target",
+    "target_label",
+    "delta_logit",
+    "delta_prob",
+    "truncated",
+)
+
+
+class NotFound(KeyError):
+    """A missing intervention or intervened tensor; ``args[0]`` is the 404 text."""
+
+
 BACKENDS = ("torchlens", "nnsight")
 
 
@@ -729,8 +970,6 @@ def cache_name(
     steps: int,
     op: str | None = None,
     channel: int | None = None,
-    baseline: str | None = None,
-    source_run: str | None = None,
 ) -> str:
     """The run-folder file that caches one job's result; also the job's dedup key."""
     k, s = okey(target, objective), safe_name(op or "")
@@ -740,14 +979,35 @@ def cache_name(
         return f"attribution/{method}_{k}_{s}_{steps}.json"
     if kind == "neuron":
         return f"attribution/neuron_{k}_{s}_c{channel}_{steps}.json"
-    if kind == "agreement":
-        return f"attribution/agreement_{k}_{steps}{'_' + s if op else ''}.json"
-    src = f"_{safe_name(source_run or '')}" if baseline == "run" else ""
-    return f"patch/{s}_{baseline}{src}_{'top' if target is None else target}.json"
+    return f"attribution/agreement_{k}_{steps}{'_' + s if op else ''}.json"
 
 
 def _first(inputs: Any) -> Any:
     return inputs[0] if isinstance(inputs, (tuple, list)) else inputs
+
+
+def _args(inputs: Any) -> tuple:
+    return tuple(inputs) if isinstance(inputs, (tuple, list)) else (inputs,)
+
+
+def _model_key(model: dict[str, Any]) -> tuple:
+    return model.get("spec"), model.get("weights")
+
+
+def _path(ir: dict[str, Any], op: str) -> str:
+    """An edit's label path: its module (``@call`` after the first call), else the op id."""
+    site = module_site(ir, op)
+    return op if site is None else site[0] + (f"@{site[1]}" if site[1] > 1 else "")
+
+
+def _pool(a: np.ndarray, pool: str) -> np.ndarray:
+    """A saved activation pooled to its channel vector (mean over the other axes; "last" = the last token)."""
+    ax = CH_AXIS.get(a.ndim)
+    if ax is None:
+        return np.zeros(0)
+    if a.ndim == 3 and pool == "last":
+        a = a[:, -1:, :]
+    return a.mean(axis=tuple(i for i in range(a.ndim) if i != ax), dtype=np.float64)
 
 
 def _float_input(live: Live) -> Live:
@@ -760,12 +1020,6 @@ def _float_input(live: Live) -> Live:
             "in the saliency panel instead."
         )
     return live
-
-
-def _spatial_mean(t: torch.Tensor) -> torch.Tensor:
-    """Mean over dims >= 2 (rank >= 3) or over the last dim (rank <= 2), broadcast back to t's shape."""
-    dims = tuple(range(2, t.dim())) or (t.dim() - 1,)
-    return t.mean(dim=dims, keepdim=True).expand_as(t).clone()
 
 
 def _free_cuda() -> None:
@@ -817,14 +1071,20 @@ def _top_k(loaded: LoadedModel, inputs: Any, k: int = 5) -> tuple[list[dict[str,
     return _top_of(logits, loaded.categories, k), None
 
 
+def _fin(x: Any) -> float | None:
+    """A float, or None when non-finite (an edit can overflow the logits)."""
+    x = float(x)
+    return x if math.isfinite(x) else None
+
+
 def _top_of(logits: torch.Tensor, cats: Sequence[str] | None, k: int = 5) -> list[dict[str, Any]]:
     probs = torch.softmax(logits, dim=0)
     vals, idx = probs.topk(min(k, probs.numel()))
     return [
         {
             "index": int(i),
-            "prob": float(v),
-            "logit": float(logits[i]),
+            "prob": _fin(v),
+            "logit": _fin(logits[i]),
             "label": cats[int(i)] if cats and int(i) < len(cats) else None,
         }
         for v, i in zip(vals, idx, strict=True)
