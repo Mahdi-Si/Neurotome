@@ -65,7 +65,7 @@ def _op_names(o: dict[str, Any], ops_in_call: dict[str, list[str]]) -> tuple[str
     addr = o.get("module") or ""
     if not addr and o["modules"] and len(ops_in_call[o["modules"][-1]]) == 1:
         addr = strip_call(o["modules"][-1])  # e.g. BatchNorm, whose buffers hide its atomicity
-    kind = PRETTY_TYPES.get(o["type"], o["type"])
+    kind: str = PRETTY_TYPES.get(o["type"]) or o["type"]
     label = "input" if o["is_input"] else "output" if o["is_output"] else (_short(addr) if addr else kind)
     return label, addr or o["id"], kind
 
@@ -73,6 +73,16 @@ def _op_names(o: dict[str, Any], ops_in_call: dict[str, list[str]]) -> tuple[str
 def _meta(o: dict[str, Any]) -> tuple[str | None, str | None]:
     """(dtype, device) of an op's output; None when not recorded (pre-M1 runs have no device)."""
     return o.get("dtype") or None, o.get("device")
+
+
+def unsaved(ir: dict[str, Any], op: dict[str, Any]) -> str | None:
+    """Why ``op`` has no tensor on disk ("budget" | "modules" | "no_tensor"), None when saved.
+    Runs before M4 lack the field: derived from ``saved`` and the run's ``truncated`` flag."""
+    if "unsaved" in op:
+        return op["unsaved"]
+    if op.get("saved"):
+        return None
+    return "budget" if ir.get("model", {}).get("truncated") else "no_tensor"
 
 
 def graph_view(
@@ -188,6 +198,7 @@ def graph_view(
                 "shape": out_op["shape"],
                 "flops": sum(ops[m]["flops"] for m in mem),
                 "stats": out_op["stats"],
+                "unsaved": unsaved(ir, out_op),
                 "group": innermost(containers_of[nid]),
                 "is_input": nid in ops and ops[nid]["is_input"],
                 "is_output": nid in ops and ops[nid]["is_output"],

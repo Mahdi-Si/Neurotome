@@ -1,0 +1,49 @@
+site_name: Neurotome
+site_description: "Open a PyTorch model and see every signal: computation graph, activations and attribution in one UI."
+copyright: Copyright 2026 Mahdi-Si · Apache-2.0
+docs_dir: docs
+
+theme:
+  name: material
+  font: false   # system fonts; no Google Fonts request
+  features:
+    - navigation.sections
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark theme
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light theme
+
+extra:
+  version:
+    provider: mike
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+
+nav:
+  - Getting started: index.md
+  - Architecture: ARCHITECTURE.md
+  - Design: DESIGN.md
+  - Plan: PLAN.md
+  - Release: RELEASE.md
+  - Specs:
+      - M1 · Graph workspace: specs/m1.md
+      - M2 · Tensor inspector: specs/m2.md
+      - M3 · Attribution and trace: specs/m3.md
+      - M4 · Hardening and release: specs/m4.md

@@ -1,0 +1,8 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["backend"],
+  "exclude": ["**/__pycache__", "backend/neurotome/static"],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.10"
+}

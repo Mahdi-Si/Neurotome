@@ -129,11 +129,13 @@ def tensor_view(
     a = _drop_batch(a)
     if a.ndim > 3:
         a = a.reshape(-1, *a.shape[-2:])
-    given = norm == "global" and lo is not None and hi is not None and bool(np.isfinite([lo, hi]).all())
+    given = None  # the caller's [lo, hi] for norm=global
+    if norm == "global" and lo is not None and hi is not None and bool(np.isfinite([lo, hi]).all()):
+        given = [float(lo), float(hi)]
     if a.ndim == 3 and a.shape[1] > 1 and a.shape[2] > 1:
         scale = None
         if norm == "global":
-            scale = [float(lo), float(hi)] if given else _finite_range(a)
+            scale = given or _finite_range(a)
         return _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scale, cmap) | {
             "norm": norm,
             "cmap": cmap,
@@ -142,7 +144,7 @@ def tensor_view(
     if a.ndim == 3:
         a = a.reshape(a.shape[0], -1)
     if a.ndim == 2:
-        return _sequence_view(a, shape, [float(lo), float(hi)] if given else None)
+        return _sequence_view(a, shape, given)
     return _vector_view(a.reshape(-1), shape)
 
 
@@ -154,7 +156,7 @@ def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scal
 
     def scaled(g: np.ndarray) -> tuple[np.ndarray, list[float]]:
         r = scale or _finite_range(g)
-        return _scale(g, *r, cmap), r
+        return _scale(g, r[0], r[1], cmap), r
 
     maps = []
     for c in order:
@@ -196,7 +198,7 @@ def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scal
 def _sequence_view(a, shape, scale=None) -> dict[str, Any]:
     T, D = a.shape
     pooled = pool2d(a, 64, 128)
-    heat = _signed(pooled) if scale is None else _scale(pooled, *scale, "div")
+    heat = _signed(pooled) if scale is None else _scale(pooled, scale[0], scale[1], "div")
     norms = np.linalg.norm(a, axis=1)
     idx, coords, ratios = _pca2(a)
     return {

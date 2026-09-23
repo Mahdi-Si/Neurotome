@@ -1,8 +1,14 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { IconArrow, IconGraph, IconHome, IconTensor, IconTrace, Logo } from "../components/Icons";
+import { JobProgress } from "../components/JobProgress";
+import { ThemeToggle } from "../components/TopBar";
 import { api } from "../lib/api";
+import { parseBudget, parseModules } from "../lib/capture";
 import { bytes } from "../lib/format";
+import { followJob } from "../lib/jobs";
 import { href, navigate } from "../lib/router";
+import { errText } from "../lib/tensorState";
+import type { Job, RunMeta } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
 
 export function HomeView() {
@@ -14,22 +20,34 @@ export function HomeView() {
   const [model, setModel] = useState("torchvision:resnet18");
   const [weights, setWeights] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
+  const [mods, setMods] = useState("");
+  const [budget, setBudget] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [job, setJob] = useState<Job<RunMeta> | null>(null);
+  const ctl = useRef<AbortController | null>(null);
+  const last = useRef<Job<RunMeta> | null>(null);
+  const track = (j: Job<RunMeta> | null) => { last.current = j; setJob(j); };
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
-    setBusy(true); setError(null);
+    const max_capture_mb = parseBudget(budget);
+    if (Number.isNaN(max_capture_mb)) { setError("Budget must be a positive number of MB, or empty for the server default"); return; }
+    const c = (ctl.current = new AbortController());
+    setBusy(true); setError(null); track(null);
     try {
       let sample: Record<string, unknown> = { kind: "random" };
       if (file) {
         const up = await api.upload(file);
         sample = { kind: "upload", upload_id: up.upload_id, name: file.name };
       }
-      const meta = await api.createRun({ model, weights: weights || null, sample });
+      const meta = await followJob<RunMeta>(
+        () => api.createRun({ model, weights: weights || null, sample, modules: parseModules(mods), max_capture_mb }), track, c.signal);
       navigate(href(meta.id, "graph"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = errText(err);
+      if (msg === "Cancelled" && last.current) track({ ...last.current, status: "cancelled" });
+      else if (last.current?.status !== "error") setError(msg);   // a failed job shows its own message in JobProgress
     } finally {
       setBusy(false);
     }
@@ -41,7 +59,7 @@ export function HomeView() {
       <aside style={{ width: 232, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "18px 12px", display: "flex", flexDirection: "column", gap: 24 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 8px" }}>
           <span style={{ display: "flex", alignItems: "center", gap: 9 }}><Logo /><span className="lbl" style={{ fontSize: 12, fontWeight: 500, letterSpacing: ".14em" }}>Neurotome</span></span>
-          <span className="lbl dim">v0.1</span>
+          <span className="lbl dim">{health.data ? `v${health.data.version}` : ""}</span>
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 2 }} aria-label="Primary">
           {[
@@ -65,10 +83,13 @@ export function HomeView() {
           <span className="mono">{location.host}</span>
           <span className="lbl dim">{health.data ? `${health.data.device} · torch ${health.data.torch}` : health.error ? "offline" : "…"}</span>
         </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 8px" }}>
+          <span className="lbl dim">Theme</span><ThemeToggle />
+        </div>
       </aside>
 
       <main className="scroll" style={{ flexGrow: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <section style={{ display: "flex", borderBottom: "1px solid var(--line)", minHeight: 320 }}>
+        <section style={{ display: "flex", borderBottom: "1px solid var(--line)", minHeight: 320, flexShrink: 0 }}>
           <div style={{ flexGrow: 1, padding: "28px 40px", display: "flex", flexDirection: "column" }}>
             <span className="lbl">Model dissection workbench</span>
             <h1 style={{ margin: "22px 0 0", fontSize: 66, letterSpacing: "-0.055em", lineHeight: 0.9 }}>Open the model.<br />See every signal.</h1>
@@ -95,9 +116,21 @@ export function HomeView() {
               <span className="lbl dim">Sample · image, .npy or .pt (empty = random tensor)</span>
               <input type="file" accept="image/*,.npy,.pt,.pth" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="mono" />
             </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span className="lbl dim">Modules · comma separated, empty = every op</span>
+              <input className="field" aria-label="Capture modules" placeholder="layer3, layer4" value={mods} onChange={(e) => setMods(e.target.value)} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span className="lbl dim" style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Budget · MB</span>{health.data?.max_capture_mb != null && <span>default {health.data.max_capture_mb}</span>}
+              </span>
+              <input className="field" type="number" min={1} step="any" aria-label="Capture budget (MB)" value={budget}
+                placeholder={health.data?.max_capture_mb != null ? String(health.data.max_capture_mb) : undefined} onChange={(e) => setBudget(e.target.value)} />
+            </label>
             <button type="submit" className="btn solid" disabled={busy} style={{ height: 44, justifyContent: "space-between", padding: "0 18px", fontWeight: 500 }}>
               {busy ? "Capturing…" : "Capture forward pass"} <IconArrow />
             </button>
+            {job && <JobProgress job={job} onCancel={() => ctl.current?.abort()} />}
             {error && <span className="err mono">{error}</span>}
           </form>
         </section>
@@ -118,7 +151,7 @@ export function HomeView() {
                 <div key={r.id} style={{ ...rowGrid, fontSize: 14 }}>
                   <a href={href(r.id, "graph")} style={{ fontWeight: 500 }}>{r.model.spec?.split(":").pop() ?? r.model.class_name}<span className="lbl dim"> · {r.id}</span></a>
                   <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.sample.name}</span>
-                  <span className="mono">{r.model.num_ops}</span>
+                  <span className="mono">{r.model.saved_ops != null && r.model.saved_ops < r.model.num_ops ? `${r.model.saved_ops}/${r.model.num_ops}` : r.model.num_ops}</span>
                   <span className="mono">{bytes(r.model.activation_bytes)}</span>
                   <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {r.output[0] ? `${r.output[0].label ?? `#${r.output[0].index}`} · ${r.output[0].prob.toFixed(2)}` : "—"}

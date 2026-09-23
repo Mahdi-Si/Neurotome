@@ -5,19 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, TypeAdapter
 
+from . import __version__
 from .attribution import METHODS
 from .config import get_settings
-from .graph import graph_view, module_tree, search_index
+from .errors import describe
+from .graph import graph_view, module_tree, search_index, unsaved
 from .jobs import TERMINAL, Job
 from .models import SUGGESTED_MODELS
 from .runs import RunManager
-from .slicing import SliceError, SliceTooLarge, slice_npy, slice_table
+from .slicing import SliceTooLarge, slice_npy, slice_table
 from .store import PREVIEW, RunStore, safe_name
 from .tensors import tensor_diff, tensor_view
 
@@ -26,7 +28,7 @@ _JSON = TypeAdapter(Any)
 
 
 class Sample(BaseModel):
-    kind: str = Field("random", pattern="^(random|upload)$")
+    kind: str = Field(default="random", pattern="^(random|upload)$")
     upload_id: str | None = None
     name: str | None = None
     shape: list[int] | None = None
@@ -37,6 +39,9 @@ class CreateRun(BaseModel):
     model: str = "torchvision:resnet18"
     weights: str | None = None
     sample: Sample = Sample()
+    modules: list[str] | None = None  # module addresses; None or [] = every op
+    # per-run override of NEUROTOME_MAX_CAPTURE_MB
+    max_capture_mb: float | None = Field(None, gt=0, allow_inf_nan=False)
 
 
 class Objective(BaseModel):
@@ -70,8 +75,16 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
             RunStore(settings.runs_dir), settings.device, settings.max_capture_bytes, settings.max_live_models
         )
     store = manager.store
-    app = FastAPI(title="Neurotome", version="0.1.0")
+    app = FastAPI(title="Neurotome", version=__version__)
     app.state.manager = manager
+
+    async def error(_request: Request, e: Exception) -> JSONResponse:
+        status, msg = describe(e)
+        return JSONResponse({"detail": msg}, status)
+
+    # not Exception: Starlette re-raises from that handler, which breaks TestClient
+    app.add_exception_handler(ValueError, error)
+    app.add_exception_handler(RuntimeError, error)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -95,20 +108,29 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(404, f"Job {job_id} not found") from None
 
-    def _attribution(run_id: str, method: str, target: int | None, steps: int, objective: dict | None):
-        try:
-            return manager.attribution(run_id, method, target, steps, objective)
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from e
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from e
-
     def _tensor(run_id: str, op_id: str):
         _meta(run_id)
         try:
             return store.load_tensor(run_id, op_id)
-        except KeyError as e:
-            raise HTTPException(404, e.args[0] if e.args else str(e)) from e
+        except KeyError:
+            raise HTTPException(404, _no_tensor(run_id, op_id)) from None
+
+    def _no_tensor(run_id: str, op_id: str) -> str:
+        ir = store.ir(run_id)
+        op = next((o for o in ir["ops"] if o["id"] == op_id), None)
+        if op is None:
+            return f"Op {op_id} not found in {run_id}"
+        why, model = unsaved(ir, op), ir["model"]
+        if why == "budget":
+            budget = model.get("budget_bytes") or manager.max_capture_bytes or 0
+            reason = (f"the capture budget ({budget / 2**20:g} MB) was reached before this op; capture again "
+                      "with a larger budget")  # fmt: skip
+        elif why == "modules":
+            mods = ", ".join(model.get("capture_modules") or [])
+            reason = f"it is outside the captured modules ({mods}); capture again with its module selected"
+        else:
+            reason = "the op produced no tensor"
+        return f"No tensor saved for {op_id}: {reason}"
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -120,6 +142,8 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
             "torch": torch.__version__,
             "cuda": torch.cuda.is_available(),
             "runs_dir": str(store.root),
+            "version": __version__,
+            "max_capture_mb": manager.max_capture_bytes / 2**20 if manager.max_capture_bytes else None,
         }
 
     @app.get("/api/models")
@@ -138,12 +162,12 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         name = file.filename or ""
         return {"upload_id": manager.save_upload(name or "upload", data), "name": name}
 
-    @app.post("/api/runs")
+    @app.post("/api/runs", status_code=202)
     def create_run(req: CreateRun) -> dict[str, Any]:
-        try:
-            return manager.create_from_spec(req.model, req.weights, req.sample.model_dump())
-        except (ValueError, KeyError, ImportError, AttributeError) as e:
-            raise HTTPException(400, str(e)) from e
+        """Start a capture job; its result is the run meta. 400 for a bad spec prefix or a missing upload."""
+        sample = req.sample.model_dump()
+        job = manager.start_capture(req.model, req.weights, sample, req.modules, req.max_capture_mb)
+        return job.to_json()
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict[str, Any]:
@@ -175,7 +199,7 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         if (obj_op is None) != (obj_ch is None):
             raise HTTPException(400, "obj_op and obj_ch go together")
         objective = {"op": obj_op, "channel": obj_ch} if obj_op is not None else None
-        res = _attribution(run_id, method, target, steps, objective) if method else {}
+        res = manager.attribution(run_id, method, target, steps, objective) if method else {}
         calls = [[c for c in s.split(",") if c] for s in (expand, collapse)]
         return graph_view(ir, depth, res.get("scores"), *calls, merges=res.get("merges"), start=obj_op)
 
@@ -209,19 +233,13 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/ops/{op_id}/slice")
     def op_slice(run_id: str, op_id: str, s: str = "") -> dict[str, Any]:
-        arr = _tensor(run_id, op_id)
-        try:
-            return slice_table(arr, s) | {"op": op_id}
-        except SliceError as e:
-            raise HTTPException(400, str(e)) from e
+        return slice_table(_tensor(run_id, op_id), s) | {"op": op_id}  # SliceError is a ValueError: 400
 
     @app.get("/api/runs/{run_id}/ops/{op_id}/slice.npy")
     def op_slice_npy(run_id: str, op_id: str, s: str = "") -> Response:
         arr = _tensor(run_id, op_id)
         try:
             data = slice_npy(arr, s)
-        except SliceError as e:
-            raise HTTPException(400, str(e)) from e
         except SliceTooLarge as e:
             raise HTTPException(413, str(e)) from e
         headers = {"Content-Disposition": f'attachment; filename="{safe_name(op_id)}.npy"'}
@@ -245,15 +263,12 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         if req.method not in METHODS:
             raise HTTPException(400, f"method must be one of {sorted(METHODS)}")
         objective = req.objective.model_dump() if req.objective else None
-        return _attribution(run_id, req.method, req.target, req.steps, objective)
+        return manager.attribution(run_id, req.method, req.target, req.steps, objective)
 
     @app.post("/api/runs/{run_id}/jobs")
     def start_job(run_id: str, req: JobRequest) -> dict[str, Any]:
         _meta(run_id)
-        try:
-            return manager.job(run_id, req.model_dump()).to_json()
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from e
+        return manager.job(run_id, req.model_dump()).to_json()
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:
@@ -292,8 +307,10 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
 
         @app.get("/{path:path}", include_in_schema=False)
         def spa(path: str) -> FileResponse:
-            f = STATIC_DIR / path
-            if path and f.is_file():
+            if path.startswith("api/"):
+                raise HTTPException(404, f"No API route /{path}")
+            f = (STATIC_DIR / path).resolve()
+            if path and f.is_relative_to(STATIC_DIR.resolve()) and f.is_file():
                 return FileResponse(f)
             # revalidate the shell so a rebuilt frontend never points at deleted hashed assets
             return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})

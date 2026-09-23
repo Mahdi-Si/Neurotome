@@ -15,12 +15,15 @@ export interface Stats {
 
 export interface TopK { index: number; prob: number; logit: number; label: string | null }
 
+export type Unsaved = "budget" | "modules" | "no_tensor";
+
 export interface RunMeta {
   id: string;
   created: number;
   model: {
     spec: string | null; weights: string | null; class_name: string; num_params: number;
     num_ops: number; flops: number; activation_bytes: number; truncated: boolean;
+    budget_bytes?: number | null; capture_modules?: string[] | null; saved_ops?: number; // absent before M4
   };
   sample: { kind: string; name: string };
   input_shape: number[] | null;
@@ -29,6 +32,7 @@ export interface RunMeta {
   reloadable: boolean;
   status: string;
   preview?: { width: number; height: number } | null; // absent on pre-M2 runs
+  output_error?: string | null; // absent before M4
 }
 
 export interface GraphNode {
@@ -51,6 +55,7 @@ export interface GraphNode {
   dtype?: string | null;
   device?: string | null;
   nonfinite?: number | null;
+  unsaved?: Unsaved | null; // null = tensor saved; absent (old server) → saved iff stats
 }
 
 export interface GraphEdge {
@@ -173,6 +178,7 @@ export interface Attribution {
   input: { map: number[][]; total: number; convergence_delta: number | null } | null;
   scores: Record<string, number>;
   top_units: { op: string; path?: string; channel: number; value: number }[];
+  input_note?: string | null;
 }
 
 export interface LayerResult {
@@ -201,7 +207,7 @@ export interface PatchResult {
   deltas: Record<string, number>; rel: Record<string, number>;   // keyed by op id (node.output_op)
 }
 
-export type JobKind = "attribution" | "layer" | "neuron" | "agreement" | "patch";
+export type JobKind = "capture" | "attribution" | "layer" | "neuron" | "agreement" | "patch";
 export type JobStatus = "queued" | "running" | "done" | "error" | "cancelled";
 export interface Job<R = unknown> {
   id: string; kind: JobKind; run_id: string | null; status: JobStatus;
@@ -213,3 +219,9 @@ export type JobRequest =
   | { kind: "neuron"; op: string; channel: number; target: number | null; objective: Objective | null; steps: number }
   | { kind: "agreement"; op: string | null; target: number | null; objective: Objective | null; steps: number }
   | { kind: "patch"; op: string; baseline: Baseline; source_run: string | null; target: number | null };
+
+export interface CreateRun {
+  model: string; weights: string | null; sample: Record<string, unknown>;
+  modules: string[] | null; max_capture_mb: number | null;
+}
+export interface Health { ok: boolean; device: string; torch: string; cuda: boolean; runs_dir: string; version: string; max_capture_mb: number | null }

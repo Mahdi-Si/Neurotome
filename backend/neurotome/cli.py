@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--weights", default=None, help="DEFAULT or a torchvision weights enum name")
     c.add_argument("--image", default=None, help="path to an image to use as the sample")
     c.add_argument("--runs-dir", default=None)
+    c.add_argument("--modules", default=None, help="save tensors only inside these modules: layer3,layer4")
+    c.add_argument("--max-capture-mb", type=float, default=None, help="capture budget for this run (MB)")
 
     args = p.parse_args(argv)
     if getattr(args, "runs_dir", None):
@@ -57,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
                     "upload_id": mgr.save_upload(args.image, f.read()),
                     "name": os.path.basename(args.image),
                 }
-        meta = mgr.create_from_spec(args.model, args.weights, sample)
+        modules = args.modules.split(",") if args.modules else None
+        meta = mgr.create_from_spec(args.model, args.weights, sample, modules, args.max_capture_mb)
         json.dump({k: meta[k] for k in ("id", "model", "sample", "output")}, sys.stdout, indent=2)
         print()
         return 0

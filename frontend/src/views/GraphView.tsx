@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { CaptureBanner } from "../components/CaptureBanner";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { GraphSearch } from "../components/GraphSearch";
 import { Inspector, ModuleTree } from "../components/panels";
@@ -114,6 +115,7 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
           ))}
         </div>
       </TopBar>
+      <CaptureBanner run={run} />
       <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
         <aside style={{ width: 248, flexShrink: 0, borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {modules.data && (

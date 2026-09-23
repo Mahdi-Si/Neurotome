@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { progressText, runJob } from "./jobs";
-import type { Job, JobRequest } from "./types";
+import { api } from "./api";
+import { followJob, progressText, runJob } from "./jobs";
+import type { CreateRun, Job, JobRequest, RunMeta } from "./types";
 
 const job = (o: Partial<Job>): Job => ({
   id: "job_000001", kind: "attribution", run_id: "run_0001", status: "queued", progress: 0, message: "",
@@ -58,5 +59,26 @@ describe("runJob without EventSource", () => {
     await expect(p).rejects.toThrow("Cancelled");
     await vi.waitFor(() => expect(calls.at(-1)).toEqual({ url: "/api/jobs/job_000001/cancel", method: "POST" }));
     expect(calls.some((c) => c.method === "GET")).toBe(false);
+  });
+});
+
+describe("followJob for a capture", () => {
+  const body: CreateRun = { model: "py:examples.custom_model:build", weights: null, sample: { kind: "random" }, modules: ["blocks.0"], max_capture_mb: 64 };
+  const cap = (o: Partial<Job>) => job({ kind: "capture", run_id: null, ...o });
+  it("posts /api/runs, polls to done and resolves the run meta", async () => {
+    const meta = { id: "run_0009" } as RunMeta;
+    const calls = stub(cap({ status: "running", progress: 0.12, message: "Trace" }), [cap({ status: "done", progress: 1, result: meta })]);
+    const seen: string[] = [];
+    await expect(followJob<RunMeta>(() => api.createRun(body), (j) => seen.push(`${j.kind} ${j.status}`))).resolves.toEqual(meta);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/runs", "GET /api/jobs/job_000001"]);
+    expect(seen).toEqual(["capture running", "capture done"]);
+  });
+  it("rejects with the capture's error", async () => {
+    stub(cap({ status: "running" }), [cap({ status: "error", error: "Cannot load model 'py:nope_missing:build': ModuleNotFoundError" })]);
+    await expect(followJob(() => api.createRun(body))).rejects.toThrow("Cannot load model");
+  });
+  it("rejects with the server's detail when the POST is refused", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Upload up_1 not found; upload the file again" }), { status: 400 })));
+    await expect(followJob(() => api.createRun(body))).rejects.toThrow("400 · Upload up_1 not found");
   });
 });

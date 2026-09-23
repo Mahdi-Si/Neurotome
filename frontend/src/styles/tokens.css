@@ -1,13 +1,16 @@
 /*
- * Neurotome design tokens. Mirrors design/tokens.json; change both together.
+ * Neurotome design tokens. Mirrors design/tokens.json ("color", "color-dark"); change both together.
  * Look: warm paper ground, 1px ink hairlines, mono uppercase labels,
  * one blue accent for positive/selected, rust for negative.
+ * Contrast floors (lib/theme.test.ts): ink and ink-2 >= 4.5 on paper and panel, accent >= 4.5 on panel,
+ * negative >= 3 (marks), negative-text >= 4.5 (text).
  */
 :root {
+  color-scheme: light;
   --paper: #f4f4f1;        /* app ground */
   --panel: #fafaf8;        /* raised panels, nodes, cards */
   --ink: #111111;          /* text, strokes */
-  --ink-2: #5e5e59;        /* secondary text (6:1 on paper) */
+  --ink-2: #5e5e59;        /* secondary text (5.9:1 on paper) */
   --line: #d6d6d1;         /* hairlines between regions */
   --line-soft: #e3e3de;    /* row separators */
   --line-faint: #c4c4be;   /* inactive edges, weak dots */
@@ -25,4 +28,57 @@
   --label-track: 0.05em;
   --radius: 2px;
   --topbar-h: 52px;
+}
+
+/* dark: chosen in the TopBar / Home toggle (stored), or the system's when nothing is stored.
+   The two blocks below must stay identical (tested). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #141413;
+  --panel: #1c1c1a;
+  --ink: #ecebe6;
+  --ink-2: #a3a29b;
+  --line: #3a3a36;
+  --line-soft: #2c2c29;
+  --line-faint: #4d4d48;
+  --muted-fill: #2c2c29;
+  --accent: #8b97ff;
+  --accent-soft: #252a4d;
+  --negative: #e8703f;
+  --negative-text: #f08a5d;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #141413;
+    --panel: #1c1c1a;
+    --ink: #ecebe6;
+    --ink-2: #a3a29b;
+    --line: #3a3a36;
+    --line-soft: #2c2c29;
+    --line-faint: #4d4d48;
+    --muted-fill: #2c2c29;
+    --accent: #8b97ff;
+    --accent-soft: #252a4d;
+    --negative: #e8703f;
+    --negative-text: #f08a5d;
+  }
+}
+
+/* Windows high contrast: system colours only. Last, and :root:root so it outranks both theme blocks. */
+@media (forced-colors: active) {
+  :root:root {
+    --paper: Canvas;
+    --panel: Canvas;
+    --ink: CanvasText;
+    --ink-2: CanvasText;
+    --line: GrayText;
+    --line-soft: GrayText;
+    --line-faint: GrayText;
+    --muted-fill: Canvas;
+    --accent: Highlight;
+    --accent-soft: Canvas;
+    --negative: LinkText;
+    --negative-text: LinkText;
+  }
 }

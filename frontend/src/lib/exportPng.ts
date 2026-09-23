@@ -29,7 +29,7 @@ function ground(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContex
   const c = document.createElement("canvas");
   c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h));
   const ctx = c.getContext("2d")!;
-  ctx.fillStyle = cssVar("--panel").trim() || "#fafaf8";
+  ctx.fillStyle = cssVar("--panel").trim();   // the current theme's ground
   ctx.fillRect(0, 0, c.width, c.height);
   return [c, ctx];
 }

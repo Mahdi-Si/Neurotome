@@ -13,14 +13,14 @@ endif
 PY := $(BIN)/python
 PIP := $(PY) -m pip
 
-.PHONY: install dev build serve test test-backend test-frontend lint clean
+.PHONY: install dev build serve test test-backend test-frontend lint e2e wheel docs bench clean
 
 $(PY)$(EXE):
 	$(PYTHON) -m venv $(VENV)
 
 install: $(PY)$(EXE)
 	$(PIP) install -U pip
-	$(PIP) install -e "./backend[dev]"
+	$(PIP) install -e "./backend[dev,docs]"
 	cd frontend && npm install
 
 dev:
@@ -43,6 +43,20 @@ test-frontend:
 lint:
 	cd backend && ../$(PY) -m ruff check .
 
+e2e:
+	cd frontend && npm run e2e
+
+wheel: build
+	rm -rf backend/dist
+	$(PY) -m build backend
+	$(PY) scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.gz"
+
+docs:
+	$(BIN)/mkdocs build --strict
+
+bench:
+	$(PY) scripts/bench.py
+
 clean:
-	rm -rf backend/neurotome/static frontend/dist runs .pytest_cache backend/.pytest_cache
+	rm -rf backend/neurotome/static backend/dist backend/build frontend/dist frontend/test-results frontend/playwright-report site runs .pytest_cache backend/.pytest_cache
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

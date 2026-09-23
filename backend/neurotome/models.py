@@ -68,14 +68,19 @@ def _default_image_preprocess(size: int = 224) -> Callable[[Any], torch.Tensor]:
 def load_model(spec: str, weights: str | None = None, device: str = "cpu") -> LoadedModel:
     """Random-init weights are seeded, so a spec reloads to the same model it was captured with
     (attribution after a restart, patching from another run of the same spec)."""
-    kind, _, rest = spec.partition(":")
+    kind, _, rest = check_spec(spec).partition(":")
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         if kind == "torchvision":
             return _load_torchvision(rest, weights, device)
-        if kind == "py":
-            return _load_python(rest, device)
-    raise ValueError(f"Unknown model spec {spec!r}. Use 'torchvision:<name>' or 'py:<module>:<factory>'.")
+        return _load_python(rest, device)
+
+
+def check_spec(spec: str) -> str:
+    """``spec`` when its prefix is known, else ValueError."""
+    if spec.partition(":")[0] not in ("torchvision", "py"):
+        raise ValueError(f"Unknown model spec {spec!r}. Use 'torchvision:<name>' or 'py:<module>:<factory>'.")
+    return spec
 
 
 def _load_torchvision(name: str, weights: str | None, device: str) -> LoadedModel:
@@ -87,7 +92,7 @@ def _load_torchvision(name: str, weights: str | None, device: str) -> LoadedMode
     norm = (IMAGENET_MEAN, IMAGENET_STD)
     if weights:
         enum = torchvision.models.get_model_weights(name)
-        w = enum.DEFAULT if weights.upper() == "DEFAULT" else enum[weights]
+        w = enum["DEFAULT" if weights.upper() == "DEFAULT" else weights]
         categories = list(w.meta.get("categories") or []) or None
         tf = w.transforms()
         preprocess = lambda img: tf(img.convert("RGB")).unsqueeze(0)  # noqa: E731
@@ -135,16 +140,25 @@ def _load_python(target: str, device: str) -> LoadedModel:
 
 def to_logits(output: Any) -> torch.Tensor:
     """Reduce a model's output to a (batch, classes) tensor that attribution can target."""
+    out: Any = None
     if isinstance(output, torch.Tensor):
         out = output
-    elif hasattr(output, "logits"):
+    elif getattr(output, "logits", None) is not None:
         out = output.logits
-    elif isinstance(output, dict):
-        out = next(v for v in output.values() if isinstance(v, torch.Tensor))
-    elif isinstance(output, (tuple, list)):
-        out = next(v for v in output if isinstance(v, torch.Tensor))
-    else:
-        raise TypeError(f"Cannot find a tensor in model output of type {type(output).__name__}")
+    if not isinstance(out, torch.Tensor):
+        seq = list(output.values()) if isinstance(output, dict) else output
+        seq = seq if isinstance(seq, (tuple, list)) else []
+        out = next((v for v in seq if isinstance(v, torch.Tensor)), None)
+    if out is None:
+        raise ValueError(
+            f"The model returned {type(output).__name__}, which holds no tensor. Neurotome explains a "
+            "tensor output: return logits, a dict/tuple/list that holds a tensor (the first one is used), or "
+            "an object with .logits (Hugging Face ModelOutput)."
+        )
+    if not out.is_floating_point():
+        raise ValueError(f"The model output is {out.dtype}; attribution needs float logits.")
+    if out.dim() == 0:
+        out = out.reshape(1, 1)
     if out.dim() == 1:
         out = out.unsqueeze(0)
     if out.dim() == 3:  # (batch, tokens, vocab): explain the last position

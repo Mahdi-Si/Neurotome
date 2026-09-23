@@ -1,9 +1,9 @@
 // Overview of the whole graph, bottom-left of GraphCanvas. Click or drag to centre the main view there.
 import { useEffect, useRef } from "react";
 import type { Placed } from "../lib/layout";
+import type { Tokens } from "../lib/theme";
 import type { NodeTone } from "../lib/types";
 import { mix, toScreen, viewRect, type Tf } from "../lib/viewport";
-import type { Tokens } from "./GraphCanvas";
 
 const MM_W = 200, MM_H = 140;
 

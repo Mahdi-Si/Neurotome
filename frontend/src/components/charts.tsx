@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { exportCanvas, exportSvg, fileName } from "../lib/exportPng";
 import { num } from "../lib/format";
+import { parseColor, useTokens } from "../lib/theme";
 
 const INK = "var(--ink)";
 const ACCENT = "var(--accent)";
@@ -233,9 +234,7 @@ function CrossMarks({ mark: [r, c], rows, cols }: { mark: Cell; rows: number; co
   );
 }
 
-const PAPER = [250, 250, 248], INK_RGB = [17, 17, 17], ACCENT_RGB = [59, 75, 219], NEG_RGB = [217, 83, 30];
-
-/** Canvas heatmap. Unsigned grid in [0,1] -> ink on paper; signed [-1,1] -> accent / rust.
+/** Canvas heatmap. Unsigned grid in [0,1] -> ink on panel; signed [-1,1] -> accent / rust (current theme's tokens).
  * `overlay`: transparent ground, accent (v ≥ 0) / negative (v < 0) at alpha |v|, drawn over the input image. */
 export function HeatCanvas({ grid, signed = false, style, label, exportName, overlay = false, onPick, mark, readout }: {
   grid: number[][]; signed?: boolean; style?: React.CSSProperties; label?: string; exportName?: string;
@@ -246,9 +245,11 @@ export function HeatCanvas({ grid, signed = false, style, label, exportName, ove
   const [hover, setHover] = useState<Cell | null>(null);
   const rows = grid.length, cols = grid[0]?.length ?? 0;
   const name = label ?? "Heatmap";
+  const tk = useTokens();
   useEffect(() => {
     const c = ref.current;
     if (!c || !grid.length) return;
+    const [PAPER, INK_RGB, ACCENT_RGB, NEG_RGB] = [tk.panel, tk.ink, tk.accent, tk.negative].map(parseColor);
     const h = grid.length, w = grid[0].length;
     c.width = w; c.height = h;
     const ctx = c.getContext("2d")!;
@@ -269,7 +270,7 @@ export function HeatCanvas({ grid, signed = false, style, label, exportName, ove
       img.data[i] = rgb[0]; img.data[i + 1] = rgb[1]; img.data[i + 2] = rgb[2]; img.data[i + 3] = alpha;
     }
     ctx.putImageData(img, 0, 0);
-  }, [grid, signed, overlay]);
+  }, [grid, signed, overlay, tk]);
   const hv = hover ? grid[hover[0]]?.[hover[1]] : undefined;
   const body = (
     <div style={{ position: "relative", height: "100%" }}>

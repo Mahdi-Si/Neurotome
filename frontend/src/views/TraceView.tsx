@@ -12,7 +12,7 @@ import { displayName, num, pct, signed } from "../lib/format";
 import { useJob } from "../lib/jobs";
 import { href, navigate, type Route } from "../lib/router";
 import { errText } from "../lib/tensorState";
-import { attrRequest, layerOp, parseTraceParams, traceParams, type TraceState } from "../lib/traceState";
+import { attrRequest, layerOp, logitsBlocked, parseTraceParams, traceParams, type TraceState } from "../lib/traceState";
 import type { AgreementResult, Attribution, GraphView, Job, LayerMethod, LayerResult, Method, NeuronResult, RunMeta } from "../lib/types";
 
 const METHODS: { id: Method; label: string }[] = [
@@ -82,6 +82,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
       .then((v) => { setView(v); setGraphErr(null); }, (e) => setGraphErr(errText(e)));
 
   const runMain = async () => {
+    if (logitsBlocked(latest.current, run.output_error)) return false;
     const req = attrRequest(latest.current);
     const attr = await main.run(run.id, req);
     if (!attr) return false;
@@ -123,6 +124,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
   }, [s.go]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const attr = res?.attr ?? null;
+  const blocked = logitsBlocked(s, run.output_error);
   const byOp = useMemo(() => new Map((view?.nodes ?? []).map((n) => [n.output_op, n])), [view]);
   const pathNodes = useMemo(() => (view?.path ?? []).map((id) => view!.nodes.find((n) => n.id === id)!).filter(Boolean), [view]);
   const maxUnit = Math.max(1e-9, ...(attr?.top_units ?? []).map((u) => Math.abs(u.value)));
@@ -145,7 +147,8 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
   return (
     <>
       <TopBar run={run} tab="trace" node={s.node}>
-        <button type="button" className="btn solid lbl" disabled={main.busy} onClick={() => void runMain()}>Run attribution</button>
+        <button type="button" className="btn solid lbl" disabled={main.busy || blocked} title={blocked ? run.output_error ?? undefined : undefined}
+          onClick={() => void runMain()}>Run attribution</button>
       </TopBar>
       <div style={{ minHeight: 56, flexShrink: 0, display: "flex", alignItems: "center", gap: 24, padding: "8px 20px", borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
         {s.obj ? (
@@ -192,6 +195,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
           <span className="lbl dim">Completeness Δ <span style={{ color: "var(--ink)" }}>{num(attr.input.convergence_delta, 4)}</span></span>
         )}
       </div>
+      {run.output_error && <div className="err mono" style={{ padding: "8px 20px", borderBottom: "1px solid var(--line)" }}>{run.output_error}</div>}
       <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
         <aside className="scroll" style={{ width: 400, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><Crosshair /><span className="lbl dim">Input · {run.input_shape?.join("×")}</span></div>
@@ -215,9 +219,11 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
                 ? <InputOverlay run={run} grid={map} signed alpha={alpha} label={neuronOn ? "Neuron conductance over input" : "Input attribution over input"}
                     exportName={mapName.replace(/\.png$/, "_overlay.png")} readout={(r, c, v) => `cell (${r}, ${c}) · rel ${num(v, 3)}`} />
                 : <DotMatrix grid={map} pitch={14} signed label={neuronOn ? "Neuron conductance" : "Input attribution"} exportName={mapName} />
-              : <div className="empty lbl" style={{ padding: "60px 0", textAlign: "center" }}>
-                  {(neuronOn ? neuron.busy : main.busy) ? "Computing…" : neuronOn ? "No map" : "Run attribution to see which inputs drove the objective"}
-                </div>}
+              : !neuronOn && !main.busy && attr?.input_note
+                ? <div className="lbl dim" style={{ padding: "24px 0", textAlign: "left" }}>{attr.input_note}</div>
+                : <div className="empty lbl" style={{ padding: "60px 0", textAlign: "center" }}>
+                    {(neuronOn ? neuron.busy : main.busy) ? "Computing…" : neuronOn ? "No map" : "Run attribution to see which inputs drove the objective"}
+                  </div>}
           </div>
           <div className="lbl dim" style={{ display: "flex", gap: 16 }}>
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />Supports</span>

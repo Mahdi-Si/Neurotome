@@ -83,6 +83,11 @@ describe("mix and readout", () => {
     expect(mix("#fafaf8", "#3b4bdb", 0)).toBe("#fafaf8");
     expect(mix("#fafaf8", "#3b4bdb", 1)).toBe("#3b4bdb");
   });
+  it("mixes rgb() tokens as read from the DOM", () => {
+    expect(mix("rgb(0, 0, 0)", "rgb(255, 255, 255)", 0.5)).toBe("#808080");
+    expect(mix("rgb(28, 28, 26)", "#8b97ff", 0)).toBe("#1c1c1a");
+    expect(mix("rgba(250, 250, 248, 1)", "rgb(59, 75, 219)", 1)).toBe("#3b4bdb");
+  });
   it("describes an edge and flags dtype/device changes", () => {
     const e = { source: "a", target: "b", shape: [1, 64, 56, 56], dtype: "torch.float32", device: "cuda:0", target_dtype: "torch.float16", target_device: "cuda:0" };
     expect(edgeReadout(e, node("a"), node("b"))).toEqual([

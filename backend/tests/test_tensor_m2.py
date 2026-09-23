@@ -194,7 +194,7 @@ def test_http_diff(captured, client):
     assert r.status_code == 200 and body["same_shape"] and body["diff"]["max_abs"] >= 0
     assert body["a"] == relu["id"] and body["shape_a"] == relu["shape"]
     missing = client.get(f"/api/runs/{run['id']}/diff", params={"a": relu["id"], "b": "nope"})
-    assert missing.status_code == 404 and missing.json()["detail"] == "No saved tensor for nope"
+    assert missing.status_code == 404 and missing.json()["detail"] == f"Op nope not found in {run['id']}"
 
 
 def test_http_input_preview(captured, client):

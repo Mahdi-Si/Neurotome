@@ -1,5 +1,6 @@
 import { href, type Tab } from "../lib/router";
 import { bytes } from "../lib/format";
+import { useTheme } from "../lib/theme";
 import type { RunMeta } from "../lib/types";
 import { Logo } from "./Icons";
 
@@ -22,15 +23,16 @@ export function TopBar({ run, tab, node, children }: {
         <Logo />
         <span className="lbl" style={{ fontSize: 12, fontWeight: 500, letterSpacing: ".14em" }}>Neurotome</span>
       </a>
-      <span style={{ width: 1, height: 20, background: "var(--line)" }} />
+      <span style={divider} />
       {run && (
-        <div className="mono dim" style={{ display: "flex", gap: 8, whiteSpace: "nowrap" }}>
+        <div className="mono dim" title={`${model} / ${run.id} / ${run.sample.name}`}
+          style={{ display: "flex", gap: 8, whiteSpace: "nowrap", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
           <span>{model}</span><span>/</span><span>{run.id}</span><span>/</span>
-          <span style={{ color: "var(--ink)" }}>{run.sample.name}</span>
+          <span style={{ color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis" }}>{run.sample.name}</span>
         </div>
       )}
       {run && (
-        <nav style={{ alignSelf: "stretch", display: "flex", marginLeft: 16 }} aria-label="Views">
+        <nav style={{ alignSelf: "stretch", display: "flex", marginLeft: 16, flexShrink: 0 }} aria-label="Views">
           {TABS.map((t) => (
             <a key={t.tab} href={href(run.id, t.tab, { node })} className="lbl"
               aria-current={t.tab === tab ? "page" : undefined}
@@ -45,11 +47,26 @@ export function TopBar({ run, tab, node, children }: {
       )}
       <div style={{ flexGrow: 1 }} />
       {run && (
-        <span className="lbl dim" style={{ whiteSpace: "nowrap" }}>
+        <span className="lbl dim" style={{ whiteSpace: "nowrap", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
           Fwd · {run.model.num_ops} ops · {bytes(run.model.activation_bytes)}
         </span>
       )}
       {children}
+      <span style={divider} />
+      <ThemeToggle />
     </header>
+  );
+}
+
+const divider: React.CSSProperties = { width: 1, height: 20, flexShrink: 0, background: "var(--line)" };
+
+/** Text button naming the theme it switches to. */
+export function ThemeToggle() {
+  const [theme, toggle] = useTheme();
+  const next = theme === "dark" ? "light" : "dark";
+  return (
+    <button type="button" className="chart-export lbl" onClick={toggle} aria-label={`Switch to ${next} theme`}>
+      {next === "dark" ? "Dark" : "Light"}
+    </button>
   );
 }

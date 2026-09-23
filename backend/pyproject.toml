@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neurotome"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Open a PyTorch model and see every signal: computation graph, activations and attribution in one UI."
 readme = "README.md"
 license = "Apache-2.0"
@@ -25,10 +25,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5"]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5", "pyright>=1.1.390", "build>=1.2"]
+# docs site tooling; never imported by the package
+docs = ["mkdocs-material>=9.5", "mike>=2.1"]
 
 [project.scripts]
 neurotome = "neurotome.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "neurotome.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["neurotome*"]

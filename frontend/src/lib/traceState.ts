@@ -51,6 +51,9 @@ export const layerOp = (lop: string | null, obj: Objective | null) => (obj && lo
 /** A tensor view's channel index is the op's axis-1 channel (what a unit objective means) only for (1, C, H, W). */
 export const channelIsAxis1 = (shape: number[]) => shape.length === 4 && shape[0] === 1;
 
+/** A logit objective cannot run when the model output has no logits; a unit objective still can. */
+export const logitsBlocked = (s: Pick<TraceState, "obj">, outputError: string | null | undefined) => !s.obj && !!outputError;
+
 export function attrRequest(s: TraceState): Extract<JobRequest, { kind: "attribution" }> {
   return { kind: "attribution", method: s.m, target: s.obj ? null : s.t, objective: s.obj, steps: s.steps };
 }

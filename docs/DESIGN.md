@@ -16,20 +16,64 @@ made in Claude's design canvas, kept here for reference. The production UI in `f
 
 ## Tokens
 
-Source of truth: `design/tokens.json`, mirrored in `frontend/src/styles/tokens.css`.
+Source of truth: `design/tokens.json` (`color`, `color-dark`), mirrored in `frontend/src/styles/tokens.css`.
+`lib/theme.test.ts` checks that the two agree and that every theme meets the contrast floors below.
 
-| Token | Value | Use |
-|---|---|---|
-| `paper` | `#F4F4F1` | App ground |
-| `panel` | `#FAFAF8` | Nodes, cards, side panels |
-| `ink` | `#111111` | Text, strokes, magnitude marks |
-| `ink-2` | `#5E5E59` | Secondary text (≈6:1 on paper) |
-| `line` / `line-soft` / `line-faint` | `#D6D6D1` / `#E3E3DE` / `#C4C4BE` | Region borders / row rules / inactive edges |
-| `accent` | `#3B4BDB` | Selection, positive attribution, dominant path, "high" |
-| `accent-soft` | `#E6E8FB` | Selected fills |
-| `negative` / `negative-text` | `#D9531E` / `#B8431A` | Negative attribution marks / text |
+| Token | Light | Dark | Use |
+|---|---|---|---|
+| `paper` | `#F4F4F1` | `#141413` | App ground |
+| `panel` | `#FAFAF8` | `#1C1C1A` | Nodes, cards, side panels |
+| `ink` | `#111111` | `#ECEBE6` | Text, strokes, magnitude marks |
+| `ink-2` | `#5E5E59` | `#A3A29B` | Secondary text |
+| `line` / `line-soft` / `line-faint` | `#D6D6D1` / `#E3E3DE` / `#C4C4BE` | `#3A3A36` / `#2C2C29` / `#4D4D48` | Region borders / row rules / inactive edges |
+| `muted-fill` | `#E6E6E1` | `#2C2C29` | Active nav, track backgrounds |
+| `accent` | `#3B4BDB` | `#8B97FF` | Selection, positive attribution, dominant path, "high" |
+| `accent-soft` | `#E6E8FB` | `#252A4D` | Selected fills |
+| `negative` / `negative-text` | `#D9531E` / `#B8431A` | `#E8703F` / `#F08A5D` | Negative attribution marks / text |
 
 The accent and negative pair passes the palette validator: CVD ΔE 30, normal-vision ΔE 38, ≥3:1 on the surface.
+
+## Themes
+
+Light is the default; dark follows `prefers-color-scheme` until the user picks one. Measured WCAG 2 contrast
+(on `paper` / on `panel`); the floors are text ≥ 4.5 and marks ≥ 3:
+
+| Token | Light | Dark | Floor |
+|---|---|---|---|
+| `ink` | 17.1 / 18.1 | 15.4 / 14.3 | text 4.5 |
+| `ink-2` | 5.9 / 6.2 | 7.2 / 6.7 | text 4.5 |
+| `accent` | 5.9 / 6.3 | 7.0 / 6.5 | text 4.5 on panel |
+| `negative` | 3.7 / 3.9 | 6.0 / 5.5 | marks 3 |
+| `negative-text` | 4.9 / 5.2 | 7.5 / 6.9 | text 4.5 |
+| on `accent-soft`: `ink` / `accent` | 15.6 / 5.4 | 11.6 / 5.2 | text 4.5 |
+
+- **CSS**: the light tokens sit on `:root` (`color-scheme: light`); the dark ones on `:root[data-theme="dark"]` and,
+  identically, on `:root:not([data-theme="light"])` inside `@media (prefers-color-scheme: dark)` (`color-scheme: dark`).
+- **Toggle**: `ThemeToggle`, a `.chart-export` `.lbl` text button naming the theme it switches to (`Dark` / `Light`,
+  `aria-label` `Switch to dark theme` / `Switch to light theme`). It sits at the far right of the TopBar after a
+  1 px `line` divider, and in the Home aside footer. The choice is stored in `localStorage` (`neurotome.theme`) only
+  when it differs from the system theme, so picking the system's theme again means "follow the system". A tiny
+  inline script in `index.html` sets `data-theme` before the bundle loads, so there is no flash of the wrong theme.
+  Storage failures (private windows) keep the choice for the session only.
+- **Canvases and exports read tokens at draw time**: the graph canvas, minimap and heatmaps take their colours from
+  `useTokens()` (resolved through a probe element, so hex, `rgb()` and system colours all work) and redraw on every
+  theme or forced-colours change; SVG charts use `var(--…)` directly; PNG exports resolve the variables when they
+  run, so an export matches the theme on screen. No literal colour lives in `src/` outside `tokens.css` and tests.
+
+## Motion
+
+There are no animated transitions or pans: pan, zoom, fit and centring set the transform at once. Any future
+animation is off under `prefers-reduced-motion: reduce` (a global guard in `global.css` sets `transition` and
+`animation` to none and `scroll-behavior` to auto).
+
+## Forced colours
+
+Under `forced-colors: active` (Windows high contrast) the token block maps to system colours only (`Canvas`,
+`CanvasText`, `GrayText`, `Highlight`, `LinkText` for negative) and wins over both theme blocks. Canvases, chart
+SVGs, node cards and inverted controls (`.btn.solid`, pressed segments) opt out of forced adjustment so they keep
+drawing with those system-colour tokens and no backplate hides their text. Selection stays visible:
+`[aria-pressed="true"]` and `[aria-current="page"]` get a 2 px `Highlight` outline inset by 2 px, and the job
+progress fill is `Highlight`. Separators remain 1 px borders.
 
 ## Type
 
@@ -68,6 +112,25 @@ The accent and negative pair passes the palette validator: CVD ΔE 30, normal-vi
   (`.chart-export` style) while the job runs. Nothing renders once the job is done; a failed job shows the server's
   message in `.err`. Used wherever a computation runs as a job (trace parameter strip, layer panel, neuron map,
   method agreement, patch panel).
+- **Capture banner**: when a run's tensors were only partly saved (capture budget reached, or a module selection),
+  a 32 px `panel` row with a 1 px `line` bottom border sits under the TopBar of the Graph and Tensor views: a
+  `.lbl pill` tag (`Truncated` / `Selective`) and a `.lbl dim` line such as
+  `Capture budget 2.0 GB reached · 412/1210 ops saved · ∅ nodes have no tensor`. No colour: it is information,
+  not an error.
+- **Node without a tensor**: a 1 px dotted `ink` border (selected, NaN-flag and on-path borders still win; the
+  input keeps its dashed border), `∅` before the shape (`∅ 16×28×28`), and `no tensor · <reason>` appended to the
+  title and hover readout. Far-zoom canvas nodes stroke with a 1.5 px dash. The inspector reads
+  `Tensor op <op> · not saved` with a dim `No tensor · <reason>` line, and `Open tensor →` is disabled with the
+  reason as its title. The Tensor view lists only nodes with a tensor; opening one without shows an `.empty`
+  state (`No tensor saved`, `<path> · <reason>`, a `← Graph` link) instead of silently picking another node.
+- **Home capture progress**: `Capture forward pass` starts a capture job; while it runs the button reads
+  `Capturing…` (disabled) and a job progress bar (`capture job`, `Load model` → `Trace` → `Save tensors i/N` →
+  `Summarise`) with `Cancel` sits under it. Two optional fields precede the button: `Modules` (comma separated,
+  empty = every op) and `Budget · MB` with the server default dim on the right. Recent runs show `saved/total`
+  in the Ops column when a capture was partial.
+- **Error lines**: every `.err` line shows the server's message without the HTTP status; a model whose output
+  cannot be explained shows its reason under the Trace parameter strip and disables `Run attribution`; input
+  attribution skipped for a non-float input shows the server's note in the saliency panel.
 - **Objective pill**: with a unit objective the Trace view's Target select becomes a `.pill`
   `Unit · <objective label>` (`relu_2_4 · ch 3 · Σ spatial` until the first result names the module path), followed
   by a `← Logits` text button that goes back to a logit target.
@@ -108,8 +171,3 @@ The accent and negative pair passes the palette validator: CVD ΔE 30, normal-vi
 - **Values table**: mono `.num` 11 px cells, right-aligned, `line-soft` row rules, headers `.lbl dim` sticky on
   `panel`; negative values and `nan`/`inf` in `negative-text`; at most 320 px high, scrolls both ways, with a
   `key · shape · axes` caption above and a dim truncation note when the slice was cut.
-
-## Not yet done
-
-- Dark theme: add a `[data-theme="dark"]` token block and re-validate the chart colors against the dark surface.
-- Reduced-motion and high-contrast (forced-colors) passes.

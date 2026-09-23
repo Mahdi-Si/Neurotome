@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Neurotome</title>
+    <script>
+      // apply the stored theme before the first paint (lib/theme.ts keeps data-theme in sync afterwards)
+      try { var t = localStorage.getItem("neurotome.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

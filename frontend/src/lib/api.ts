@@ -1,5 +1,5 @@
 import type {
-  Attribution, DiffResult, Fold, GraphView, IndexEntry, Job, JobRequest, Method, ModuleEntry, Objective, RunMeta, SliceResult,
+  Attribution, CreateRun, DiffResult, Fold, GraphView, Health, IndexEntry, Job, JobRequest, Method, ModuleEntry, Objective, RunMeta, SliceResult,
   TensorOpts, TensorView,
 } from "./types";
 
@@ -26,12 +26,11 @@ const json = (body: unknown): RequestInit => ({
 const enc = encodeURIComponent;
 
 export const api = {
-  health: () => req<{ ok: boolean; device: string; torch: string; cuda: boolean; runs_dir: string }>("/api/health"),
+  health: () => req<Health>("/api/health"),
   models: () => req<{ suggested: string[]; methods: Record<Method, string> }>("/api/models"),
   runs: () => req<RunMeta[]>("/api/runs"),
   run: (id: string) => req<RunMeta>(`/api/runs/${enc(id)}`),
-  createRun: (body: { model: string; weights: string | null; sample: Record<string, unknown> }) =>
-    req<RunMeta>("/api/runs", json(body)),
+  createRun: (body: CreateRun) => req<Job<RunMeta>>("/api/runs", json(body)),   // 202 + capture job
   deleteRun: (id: string) => req<{ deleted: boolean }>(`/api/runs/${enc(id)}`, { method: "DELETE" }),
   upload: (file: File) => {
     const fd = new FormData();

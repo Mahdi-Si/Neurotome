@@ -7,7 +7,9 @@ TorchLens upgrade or a different capture backend only has to change this file.
 IR schema (ir.json)::
 
     {
-      "model":  {"class_name", "num_params", "num_ops", "flops", "activation_bytes"},
+      "model":  {"class_name", "num_params", "num_ops", "flops", "activation_bytes",
+                 "truncated"        (an op was skipped for the budget), "budget_bytes" | null,
+                 "capture_modules"  ([addresses] | null), "saved_ops" (non-io ops saved)}  (last 3: M4)
       "ops": [{
           "id":        stable id, e.g. "conv2d_3_8" (".p2" suffix for 2nd pass of a recurrent op)
           "type":      "conv2d" | "relu" | "iadd" | "input" | "output" | ...
@@ -19,6 +21,7 @@ IR schema (ir.json)::
           "modules":   ["layer1:1", "layer1.0:1", "layer1.0.conv2:1"]  module-call stack, outermost first
           "module":    "layer1.0.conv2" or null (the leaf module that produced it)
           "num_params", "flops", "is_input", "is_output", "saved"
+          "unsaved":   null (saved) | "budget" | "modules" | "no_tensor"   (absent before M4)
           "stats":     {"mean","std","min","max","zero_frac","hist":[32 ints],"hist_range":[lo,hi],"numel",
                         "nan","inf"}  moments/hist over finite values; nan/inf counts absent before M1
       }],
@@ -30,11 +33,14 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
+from .errors import NO_GRAD, TraceError
+from .graph import strip_call
+from .jobs import Progress
 from .store import RunStore
 from .tensors import safe_range
 
@@ -120,31 +126,99 @@ def _first_tensor(value: Any) -> torch.Tensor | None:
     return None
 
 
+def _trace_or_raise(model: torch.nn.Module, inputs: Any, save_grads: bool = False):
+    try:
+        return _run_trace(model, inputs, save_grads)
+    except torch.cuda.OutOfMemoryError:
+        raise
+    except Exception as e:  # noqa: BLE001 - anything TorchLens or forward() raises
+        first = (str(e).strip().splitlines() or [""])[0][:300]
+        raise TraceError(
+            f"TorchLens could not trace forward(): {type(e).__name__}: {first}. Check that model(x) runs on "
+            "this input outside Neurotome; ops TorchLens cannot record (custom CUDA kernels, C++ extensions) "
+            "are the usual cause."
+        ) from e
+
+
+def _module_table(trace) -> dict[str, dict[str, Any]]:
+    modules: dict[str, dict[str, Any]] = {}
+    for m in _safe(lambda: list(trace.modules), []) or []:
+        addr = str(m.address)
+        modules["" if addr == "self" else addr] = {
+            "class_name": str(_safe(lambda m=m: m.class_name, "")),
+            "num_params": int(_safe(lambda m=m: m.num_params, 0) or 0),
+            "depth": int(_safe(lambda m=m: m.address_depth, 0) or 0),
+        }
+    return modules
+
+
+def _check_modules(selection: list[str], table: dict[str, Any]) -> None:
+    bad = [m for m in selection if m not in table or not m]
+    if bad:
+        top = [a for a in table if a and "." not in a][:5]
+        raise ValueError(
+            f"Unknown module(s) {', '.join(bad)}; pick addresses from the module tree, e.g. {', '.join(top)}"
+        )
+
+
+def _out(value: Any) -> torch.Tensor:
+    """``_first_tensor`` where the caller knows there is one (typing only)."""
+    return cast(torch.Tensor, _first_tensor(value))
+
+
 def capture(
     model: torch.nn.Module,
     inputs: Any,
     store: RunStore,
     run_id: str,
     max_bytes: int | None = None,
+    modules: list[str] | None = None,
+    progress: Progress | None = None,
 ) -> dict[str, Any]:
-    """Trace ``model(inputs)``, save every activation to the run store and return the IR."""
+    """Trace ``model(inputs)``, save activations to the run store and return the IR.
+
+    ``modules``: module addresses whose ops are saved (None: every op). ``max_bytes``: the disk budget; it is
+    never crossed: after the first non-io op that does not fit, every later non-io op is skipped. Input and
+    output ops are always saved. Stats are computed for every op with a tensor, saved or not."""
     model.eval()
-    trace = _run_trace(model, inputs)
+    if progress:
+        progress(0.12, "Trace")
+    trace = _trace_or_raise(model, inputs)
+    table = _module_table(trace)
+    selection = set(modules or ())
+    if modules:
+        _check_modules(modules, table)
     ops = _visible_ops(trace)
     by_obj, by_label = _id_maps(ops)
+    outs = [_first_tensor(_safe(lambda op=op: op.out)) for op in ops]
+    # ponytail: memory during the trace is unchanged; pass TorchLens layer labels when big models need it
+    total = sum(t.numel() * 4 for op, t in zip(ops, outs, strict=True) if t is not None and _io(op))
+    over = False
 
     ir_ops: list[dict[str, Any]] = []
-    total_bytes = 0
-    for op in ops:
+    disk_bytes = 0
+    n, step = len(ops), max(1, len(ops) // 50)
+    for i, (op, out) in enumerate(zip(ops, outs, strict=True), start=1):
         oid = by_obj[id(op)]
-        out = _first_tensor(_safe(lambda op=op: op.out))
-        saved = False
-        stats = None
-        if out is not None and (max_bytes is None or total_bytes < max_bytes):
+        unsaved, stats = None, None
+        if out is None:
+            unsaved = "no_tensor"
+        elif not _io(op):
+            need = out.numel() * 4
+            stack = _safe(lambda op=op: op.modules, []) or []
+            inside = not selection or any(strip_call(str(c)) in selection for c in stack)
+            if not inside:
+                unsaved = "modules"
+            elif over or (max_bytes is not None and total + need > max_bytes):
+                over, unsaved = True, "budget"
+            else:
+                total += need
+        if out is not None:
             arr = out.detach().to("cpu", torch.float32).numpy()
             stats = tensor_stats(arr)
-            total_bytes += store.save_tensor(run_id, oid, arr)
-            saved = True
+            if unsaved is None:
+                disk_bytes += store.save_tensor(run_id, oid, arr)
+            del arr
         shape = _safe(lambda op=op: list(op.shape), None) or (list(out.shape) if out is not None else [])
         ir_ops.append(
             {
@@ -166,33 +240,42 @@ def capture(
                 "flops": int(_safe(lambda op=op: op.flops_forward, 0) or 0),
                 "is_input": bool(op.is_input),
                 "is_output": bool(op.is_output),
-                "saved": saved,
+                "saved": unsaved is None,
+                "unsaved": unsaved,
                 "stats": stats,
             }
         )
+        if progress and (i % step == 0 or i == n):
+            progress(0.2 + 0.7 * i / n, f"Save tensors {i}/{n}")
 
-    modules: dict[str, dict[str, Any]] = {}
-    for m in _safe(lambda: list(trace.modules), []) or []:
-        addr = str(m.address)
-        modules["" if addr == "self" else addr] = {
-            "class_name": str(_safe(lambda m=m: m.class_name, "")),
-            "num_params": int(_safe(lambda m=m: m.num_params, 0) or 0),
-            "depth": int(_safe(lambda m=m: m.address_depth, 0) or 0),
-        }
-
+    body = [o for o in ir_ops if not (o["is_input"] or o["is_output"])]
     ir = {
         "model": {
             "class_name": type(model).__name__,
             "num_params": int(sum(p.numel() for p in model.parameters())),
-            "num_ops": sum(1 for o in ir_ops if not (o["is_input"] or o["is_output"])),
+            "num_ops": len(body),
             "flops": int(_safe(lambda: trace.total_flops_forward, 0) or 0),
-            "activation_bytes": total_bytes,
-            "truncated": max_bytes is not None and total_bytes >= max_bytes,
+            "activation_bytes": disk_bytes,
+            "truncated": over,
+            "budget_bytes": max_bytes,
+            "capture_modules": list(modules) if modules else None,
+            "saved_ops": sum(1 for o in body if o["saved"]),
         },
         "ops": ir_ops,
-        "modules": modules,
+        "modules": table,
     }
     return ir
+
+
+def _io(op) -> bool:
+    return bool(op.is_input or op.is_output)
+
+
+def _grad_leaf(x: Any) -> Any:
+    """Float inputs require grad, so node gradients also reach frozen or parameter-free models."""
+    if torch.is_tensor(x) and x.is_floating_point():
+        return x.detach().clone().requires_grad_(True)
+    return type(x)(_grad_leaf(i) for i in x) if isinstance(x, (tuple, list)) else x
 
 
 def op_gradients(
@@ -211,7 +294,7 @@ def op_gradients(
     For linear merges (add, sub, cat, stack) the contributions of an op sum to its own grad × act score.
     """
     model.eval()
-    trace = _run_trace(model, inputs, save_grads=True)
+    trace = _trace_or_raise(model, _grad_leaf(inputs), save_grads=True)
     ops = _visible_ops(trace)
     by_obj, _ = _id_maps(ops)
     logit = None
@@ -231,6 +314,8 @@ def op_gradients(
         if out.dim() < 2 or not 0 <= c < out.shape[1]:
             raise ValueError(f"Channel {c} out of range for {op_id} with shape {list(out.shape)}")
         target, root = None, out[0, c].sum()
+    if not root.requires_grad:
+        raise ValueError(NO_GRAD)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         trace.log_backward(root)
@@ -283,7 +368,7 @@ def _merge(op, every: dict[str, Any], by_obj: dict[int, str]) -> dict[str, float
     leaves: dict[str, torch.Tensor] = {}
     slots: dict[int, Any] = {}
     for k, p in parents.items():
-        t = _first_tensor(p.out).detach()
+        t = _out(p.out).detach()
         if id(p) in by_obj:  # visible parent -> one leaf per op; buffers stay constants
             t = leaves.setdefault(by_obj[id(p)], t.clone().requires_grad_(True)).clone()  # in-place funcs
         if isinstance(k, tuple):  # (i, j): element j of a list at position i, e.g. cat([a, b])
@@ -300,7 +385,7 @@ def _merge(op, every: dict[str, Any], by_obj: dict[int, str]) -> dict[str, float
     if next(rest, rest) is not rest:
         return None
     with torch.enable_grad():
-        y = _first_tensor(op.func(*args, **op.non_tensor_kwargs))
+        y = _out(op.func(*args, **op.non_tensor_kwargs))
         grads = torch.autograd.grad(y, list(leaves.values()), grad.to(y.dtype), allow_unused=True)
     return {
         pid: 0.0 if g is None else float((g.detach() * leaf.detach()).float().sum())
@@ -382,4 +467,4 @@ def patch(
         if oid in keep:
             after[oid] = a.clone()
     out_op = next(o for o in ops if o.is_output)
-    return {"deltas": deltas, "rel": rel, "after": after, "logits_after": _first_tensor(out_op.out).detach()}
+    return {"deltas": deltas, "rel": rel, "after": after, "logits_after": _out(out_op.out).detach()}

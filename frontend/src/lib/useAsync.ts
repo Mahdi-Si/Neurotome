@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { errText } from "./tensorState";
 
 export interface Async<T> { data: T | null; error: string | null; loading: boolean }
 
@@ -11,7 +12,7 @@ export function useAsync<T>(fn: () => Promise<T> | null, deps: unknown[]): Async
     if (!p) { setState({ data: null, error: null, loading: false }); return; }
     setState((s) => ({ data: s.data, error: null, loading: true }));
     p.then((data) => alive && setState({ data, error: null, loading: false }))
-      .catch((e) => alive && setState({ data: null, error: e instanceof Error ? e.message : String(e), loading: false }));
+      .catch((e) => alive && setState({ data: null, error: errText(e), loading: false }));
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);

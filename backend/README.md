@@ -1,4 +1,63 @@
-# neurotome (Python package)
+# Neurotome
 
-Backend of Neurotome: capture, graph and tensor views, attribution, HTTP API and CLI.
-See the repository README and docs/ARCHITECTURE.md.
+Open a PyTorch model and see every signal: the computation graph, every activation and attribution, in one
+local web UI.
+
+Neurotome runs one forward pass through TorchLens, stores every
+op's output on disk and serves a browser workspace on `localhost`:
+
+- **Graph**: the whole computation graph, folded by module depth, searchable, coloured by activation statistics or
+  attribution, with the dominant path from the output back to the input.
+- **Tensors**: any op's output as channel maps, sequences or vectors, slices as tables or `.npy` downloads, and a
+  side-by-side diff of two ops.
+- **Trace**: integrated gradients, saliency and gradient × input on the input; gradient × activation on every op;
+  layer and neuron conductance; method agreement; activation patching. Every number names the method behind it.
+
+Tensors never leave your machine: the browser only receives small server-side summaries.
+
+## Install
+
+```bash
+pip install neurotome
+```
+
+Requires Python 3.10+ and PyTorch 2.2+ (install the CUDA build of PyTorch first if you want to capture on a GPU).
+
+## Use
+
+Start the server and open the UI at <http://127.0.0.1:7070>:
+
+```bash
+neurotome serve                      # --device cuda, --port, --runs-dir
+```
+
+Pick a model (`torchvision:resnet18`, or `py:package.module:factory` for your own), a sample and press
+**Capture forward pass**. Or capture from the command line:
+
+```bash
+neurotome capture torchvision:resnet50 --weights DEFAULT --image cat.jpg
+neurotome capture py:mypkg.models:build --modules layer3,layer4 --max-capture-mb 512
+```
+
+From a script or notebook:
+
+```python
+import neurotome
+
+neurotome.open(model, x)               # capture model(x), then serve the UI
+neurotome.open(model, x, block=False)  # notebooks: serve in the background
+```
+
+Runs live in `./runs` (`NEUROTOME_RUNS_DIR`). Other settings: `NEUROTOME_DEVICE`, `NEUROTOME_PORT`,
+`NEUROTOME_HOST`, `NEUROTOME_MAX_CAPTURE_MB` (the per-run disk budget for activations) and
+`NEUROTOME_MAX_LIVE_MODELS`.
+
+`py:` specs import and run code, so the server binds to localhost by default; do not expose it on a network.
+
+## Documentation
+
+See the Neurotome documentation site (Getting started, Architecture, Design) for the full guide.
+
+## License
+
+Apache-2.0

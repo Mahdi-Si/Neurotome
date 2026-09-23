@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { CaptureBanner } from "../components/CaptureBanner";
 import { DivergingBars, DotMatrix, HeatCanvas, Histogram, LinePlot, Scatter } from "../components/charts";
 import { ComparePanel } from "../components/ComparePanel";
 import { Crosshair } from "../components/Icons";
@@ -6,6 +7,7 @@ import { InputOverlay, OverlayControls } from "../components/InputOverlay";
 import { TopBar } from "../components/TopBar";
 import { ValuesTable } from "../components/ValuesTable";
 import { api } from "../lib/api";
+import { hasTensor, unsavedText } from "../lib/capture";
 import { exportTiles, fileName } from "../lib/exportPng";
 import { num, shape } from "../lib/format";
 import { href, navigate, type Route } from "../lib/router";
@@ -21,12 +23,18 @@ const textBtn = "lbl chart-export";
 
 export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const graph = useAsync(() => api.graph(run.id, 12), [run.id]);
-  const nodes = useMemo(() => (graph.data?.nodes ?? []).filter((n) => n.stats), [graph.data]);
+  const nodes = useMemo(() => (graph.data?.nodes ?? []).filter(hasTensor), [graph.data]);
   const s = parseTensorParams(route.params);
+  // the URL's node without a saved tensor gets an empty state, never a silent fallback to another node
+  const missing = useMemo(() => {
+    const all = graph.data?.nodes ?? [];
+    const n = all.find((x) => x.id === s.node) ?? all.find((x) => x.output_op === s.node);
+    return n && !hasTensor(n) ? n : null;
+  }, [graph.data, s.node]);
   const node: GraphNode | null = useMemo(
-    () => nodes.find((n) => n.id === s.node) ?? nodes.find((n) => n.output_op === s.node)
+    () => missing ? null : nodes.find((n) => n.id === s.node) ?? nodes.find((n) => n.output_op === s.node)
       ?? nodes.find((n) => n.shape.length === 4 && !n.is_input) ?? nodes[0] ?? null,
-    [nodes, s.node]);
+    [nodes, s.node, missing]);
   const cmp = s.cmp ? nodes.find((n) => n.id === s.cmp) ?? null : null;
   const tensor = useAsync(
     () => (node ? api.tensor(run.id, node.output_op, { channel: s.c, py: s.py, px: s.px, norm: s.norm, cmap: s.cmap })
@@ -46,13 +54,15 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
 
   return (
     <>
-      <TopBar run={run} tab="tensors" node={node?.id} />
+      <TopBar run={run} tab="tensors" node={missing?.id ?? node?.id} />
+      <CaptureBanner run={run} />
       <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
         <aside style={{ width: 300, flexShrink: 0, borderRight: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 20 }} className="scroll">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><Crosshair /><span className="lbl dim">Tensor · output</span></div>
             <label className="lbl dim" htmlFor="node-pick">Node</label>
-            <select id="node-pick" className="field" value={node?.id ?? ""} onChange={(e) => go({ node: e.target.value, c: null, py: null, px: null, cmp: null })}>
+            <select id="node-pick" className="field" value={missing?.id ?? node?.id ?? ""} onChange={(e) => go({ node: e.target.value, c: null, py: null, px: null, cmp: null })}>
+              {missing && <option value={missing.id} disabled>{missing.path} · no tensor</option>}
               {nodes.map((n) => <option key={n.id} value={n.id}>{n.path} · {n.type}</option>)}
             </select>
             {node && <span className="lbl dim">{node.type} · {node.output_op}</span>}
@@ -130,8 +140,16 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
             pixel={s.py != null && s.px != null ? [s.py, s.px] : pixel} norm={s.norm} cmap={s.cmap} onPixel={(py, px) => go({ py, px })} />
         ) : (
           <>
+            {missing && (
+              <div className="empty" style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" }}>
+                <span className="lbl">No tensor saved</span>
+                <span className="lbl dim">{[missing.path, unsavedText(missing.unsaved)].filter(Boolean).join(" · ")}</span>
+                <a className="lbl chart-export" href={href(run.id, "graph", { node: missing.id })}>← Graph</a>
+              </div>
+            )}
+            {graph.error && <div className="empty err">{graph.error}</div>}
             {tensor.error && <div className="empty err">{tensor.error}</div>}
-            {!t && !tensor.error && <div className="empty lbl">{tensor.loading ? "Loading tensor…" : "No tensor saved for this node"}</div>}
+            {!missing && !graph.error && !t && !tensor.error && <div className="empty lbl">{tensor.loading || graph.loading ? "Loading tensor…" : "No tensor saved for this node"}</div>}
             {t && tOp && (
               <TensorBody run={run} op={tOp} t={t} onChannel={(c) => go({ c })} onPixel={(py, px) => go({ py, px })} />
             )}

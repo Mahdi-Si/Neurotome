@@ -41,12 +41,13 @@ h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.04em; }
   justify-content: center; gap: 8px;
 }
 .btn.solid { background: var(--ink); color: var(--panel); }
-.btn.solid:hover { background: #2a2a2a; color: var(--panel); }
+.btn.solid:hover { opacity: 0.86; color: var(--panel); }
+.btn.solid:disabled:hover { opacity: 0.45; }
 .btn:disabled { opacity: 0.45; cursor: default; }
 
 .seg { display: inline-flex; border: 1px solid var(--ink); }
 .seg > button {
-  height: 28px; padding: 0 11px; border: 0; background: transparent; cursor: pointer;
+  height: 28px; padding: 0 11px; border: 0; background: transparent; cursor: pointer; white-space: nowrap;
 }
 .seg > button + button { border-left: 1px solid var(--ink); }
 .seg > button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
@@ -64,7 +65,7 @@ h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.04em; }
 
 .dotgrid {
   background-color: var(--paper);
-  background-image: radial-gradient(rgba(17, 17, 17, 0.16) 1px, transparent 1.3px);
+  background-image: radial-gradient(color-mix(in srgb, var(--ink) 16%, transparent) 1px, transparent 1.3px);
   background-size: 16px 16px;
 }
 
@@ -84,3 +85,17 @@ h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.04em; }
 /* job progress: 4px line-soft track with an accent fill at the job's progress */
 .job-track { height: 4px; background: var(--line-soft); }
 .job-track > div { height: 100%; background: var(--accent); }
+
+/* no animated transitions or pans exist; any future one is off under reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+}
+
+/* Windows high contrast: canvases and chart SVGs draw with the (system colour) tokens; selection stays visible */
+@media (forced-colors: active) {
+  canvas, svg[role="img"] { forced-color-adjust: none; }
+  /* inverted controls keep their (system colour) inversion; forced adjustment would hide their text behind a backplate */
+  .btn.solid, .seg > button[aria-pressed="true"], .graph-canvas button { forced-color-adjust: none; }
+  [aria-pressed="true"], [aria-current="page"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  .job-track > div { forced-color-adjust: none; background: Highlight; }
+}

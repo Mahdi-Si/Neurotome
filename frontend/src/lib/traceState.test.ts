@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { href, parseHash } from "./router";
-import { attrRequest, channelIsAxis1, layerOp, matrixTone, parseTraceParams, traceParams, type TraceState } from "./traceState";
+import { attrRequest, channelIsAxis1, layerOp, logitsBlocked, matrixTone, parseTraceParams, traceParams, type TraceState } from "./traceState";
 
 const q = (s: string) => new URLSearchParams(s);
 const roundTrip = (s: Partial<TraceState>) => parseTraceParams(parseHash(href("run_0001", "trace", traceParams(s))).params);
@@ -71,5 +71,14 @@ describe("trace from a unit", () => {
     expect(channelIsAxis1([2, 64, 8, 8])).toBe(false);
     expect(channelIsAxis1([1, 16, 4, 8, 8])).toBe(false);
     expect(channelIsAxis1([64, 8, 8])).toBe(false);
+  });
+});
+
+describe("logitsBlocked", () => {
+  it("blocks only logit objectives on a run whose output has no logits", () => {
+    const obj = { op: "conv2d_1_1", channel: 1 };
+    expect(logitsBlocked({ obj: null }, "no logits")).toBe(true);
+    expect(logitsBlocked({ obj }, "no logits")).toBe(false);
+    expect(logitsBlocked({ obj: null }, null)).toBe(false);
   });
 });

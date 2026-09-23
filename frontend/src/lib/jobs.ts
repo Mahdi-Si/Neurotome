@@ -19,10 +19,10 @@ export function progressText(job: Job): string {
 
 const POLL_MS = 400;
 
-/** Start a job and follow it to the end: POST, then SSE (EventSource) or, without EventSource or after an SSE
- * error, polling GET every 400 ms. Resolves the result when done; rejects with Error(job.error) on error and
+/** Follow the job `start` creates to its end: SSE (EventSource) or, without EventSource or after an SSE error,
+ * polling GET every 400 ms. Resolves the result when done; rejects with Error(job.error) on error and
  * Error("Cancelled") when cancelled. Aborting `signal` cancels the job server-side and rejects with Error("Cancelled"). */
-export function runJob<R>(runId: string, body: JobRequest, onUpdate?: (job: Job<R>) => void, signal?: AbortSignal): Promise<R> {
+export function followJob<R>(start: () => Promise<Job>, onUpdate?: (job: Job<R>) => void, signal?: AbortSignal): Promise<R> {
   return new Promise<R>((resolve, reject) => {
     if (signal?.aborted) { reject(new Error("Cancelled")); return; }
     let id: string | null = null, es: EventSource | null = null, over = false;
@@ -42,7 +42,7 @@ export function runJob<R>(runId: string, body: JobRequest, onUpdate?: (job: Job<
       timer = setTimeout(() => api.job(id!).then((j) => { update(j as Job<R>); if (!over) poll(); }, fail), POLL_MS);
     };
     signal?.addEventListener("abort", abort);
-    api.startJob(runId, body).then((j) => {
+    start().then((j) => {
       if (over) { api.cancelJob(j.id).catch(() => {}); return; }   // aborted while the POST was in flight
       id = j.id;
       update(j as Job<R>);
@@ -53,6 +53,11 @@ export function runJob<R>(runId: string, body: JobRequest, onUpdate?: (job: Job<
       es.onerror = () => { es?.close(); es = null; if (!over) poll(); };
     }, fail);
   });
+}
+
+/** Start a run job (POST /api/runs/{id}/jobs) and follow it: see followJob. */
+export function runJob<R>(runId: string, body: JobRequest, onUpdate?: (job: Job<R>) => void, signal?: AbortSignal): Promise<R> {
+  return followJob<R>(() => api.startJob(runId, body), onUpdate, signal);
 }
 
 /** One job slot for a panel: run() cancels a job still running in this slot (superseded), then starts the new one.

@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
-from .capture import _first_tensor, op_gradients
+from .capture import _out, op_gradients
 from .models import to_logits
 from .tensors import pool2d
 
@@ -63,7 +63,7 @@ def objective_forward(
             model(x)
         finally:
             handle.remove()
-        out = _first_tensor(seen[call - 1])
+        out = _out(seen[call - 1])
         return out[:, channel].reshape(out.shape[0], -1).sum(1, keepdim=True)
 
     return fwd, 0
@@ -127,8 +127,9 @@ def input_map(attr: torch.Tensor, delta: float | None) -> dict[str, Any]:
 
 
 def input_attribution(
-    model, x: torch.Tensor, target: int, method: str, steps: int, fwd=None, progress: Progress | None = None
-) -> dict[str, Any]:
+    model, x: torch.Tensor, target: int | None, method: str, steps: int, fwd=None,
+    progress: Progress | None = None,
+) -> dict[str, Any]:  # fmt: skip
     from captum.attr import InputXGradient, IntegratedGradients, Saliency
 
     fwd = fwd or (lambda x: to_logits(model(x)))
@@ -152,6 +153,17 @@ def input_attribution(
     else:
         raise ValueError(f"Unknown method {method!r}; choose one of {sorted(METHODS)}")
     return input_map(attr, delta)
+
+
+def input_note(x: Any, method: str) -> str | None:
+    """Why input attribution is skipped for ``x``, or None when it runs."""
+    if not torch.is_tensor(x):
+        return "Input attribution needs a tensor input; node scores still cover every op."
+    if x.is_floating_point():
+        return None
+    return (f"{METHODS.get(method, method)} needs a float input; this input is {x.dtype} (token ids?), so "
+            "input attribution is skipped. Node scores (gradient × activation) still cover every op; "
+            "embedding-layer methods are planned for v0.2.")  # fmt: skip
 
 
 def attribute(
@@ -191,9 +203,10 @@ def attribute(
     report(0.02, "Node gradients")
     internal = op_gradients(model, inputs, target, to_logits, objective)
 
-    input_attr = None
-    if torch.is_tensor(x) and x.is_floating_point():
-        fwd, t = objective_forward(model, site if objective else None, objective and objective["channel"])
+    input_attr, note = None, input_note(x, method)
+    if note is None:
+        channel = int(objective["channel"]) if objective else None
+        fwd, t = objective_forward(model, site if objective else None, channel)
         sub = (lambda f, m: report(0.1 + 0.88 * f, m)) if progress else None
         input_attr = input_attribution(model, x, target if t is None else t, method, steps, fwd, sub)
 
@@ -206,7 +219,7 @@ def attribute(
     top_units.sort(reverse=True)
     if objective is None:
         info = {"kind": "logit", "index": target}
-        label = logit_label(target, categories)
+        label = logit_label(cast(int, target), categories)  # set above when objective is None
     else:
         info = {"kind": "unit", "op": objective["op"], "channel": int(objective["channel"])}
         label = unit_label(objective["op"], info["channel"])
@@ -225,6 +238,7 @@ def attribute(
         "value": internal["value"],
         "steps": steps if method == "ig" else None,
         "input": input_attr,
+        "input_note": note,
         "scores": internal["scores"],
         "merges": internal["merges"],
         "channel_scores": internal["channel_scores"],
@@ -253,14 +267,14 @@ def layer_attribution(
         internal_batch_size=size,
         return_convergence_delta=True,
     )
-    a = _first_tensor(attr).detach()[0].float()
+    a = _out(attr).detach()[0].float()
     chans = (a.flatten(1).sum(1) if a.dim() >= 2 else a).cpu()
     order = chans.abs().argsort(descending=True, stable=True)[:12]
     return {
         "channels": chans.tolist(),
         "top": [{"channel": int(c), "value": float(chans[c])} for c in order],
         "total": float(chans.sum()),
-        "convergence_delta": float(delta.abs().max()),
+        "convergence_delta": float(cast(torch.Tensor, delta).abs().max()),
     }
 
 
@@ -287,7 +301,7 @@ def channel_conductance(
             with torch.enable_grad():
                 xs = (a * x).requires_grad_(True)
                 f = fwd(xs)[:, target]
-                y = _first_tensor(kept[0])
+                y = _out(kept[0])
                 g = torch.autograd.grad(f.sum(), y, retain_graph=True)[0].detach()
                 s = (g[:, channel] * y[:, channel]).sum()
                 acc += torch.autograd.grad(s, xs)[0].sum(0)

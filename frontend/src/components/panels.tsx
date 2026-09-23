@@ -1,5 +1,6 @@
 // Side panels shared by views: module tree (left) and node inspector (right).
 import { useMemo, useState } from "react";
+import { unsavedText } from "../lib/capture";
 import { fileName } from "../lib/exportPng";
 import { compact, displayName, dtypeShort, num, pct, shape, shapeShort } from "../lib/format";
 import { rms } from "../lib/graphState";
@@ -88,10 +89,11 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
           ["FLOPs", compact(node.flops)],
           ["Dtype", dtypeShort(node.dtype)],
           ["Device", node.device ?? "—"],
-          ["Tensor op", node.output_op],
+          ["Tensor op", node.unsaved ? `${node.output_op} · not saved` : node.output_op],
         ].map(([k, v]) => (
           <div key={k} className="kv"><span className="lbl dim">{k}</span><span className="mono" style={{ textAlign: "right", wordBreak: "break-all" }}>{v}</span></div>
         ))}
+        {node.unsaved && <div className="lbl dim" style={{ paddingTop: 7 }}>No tensor · {unsavedText(node.unsaved)}</div>}
       </div>
       {st && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -140,7 +142,9 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: "auto" }}>
         {node.shape.length >= 2 && <TraceFrom key={node.id} runId={runId} node={node} />}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-          <a href={href(runId, "tensors", { node: node.output_op })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>
+          {node.unsaved
+            ? <button type="button" className="btn solid lbl" disabled title={`No tensor saved (${unsavedText(node.unsaved)})`} style={{ height: 38 }}>Open tensor →</button>
+            : <a href={href(runId, "tensors", { node: node.output_op })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>}
           <a href={href(runId, "trace", { node: node.id })} className="btn lbl" style={{ height: 38 }}>Trace</a>
           <a href={href(runId, "trace", traceParams({ node: node.id, layer: "layer_ig", lop: node.output_op, go: true }))}
             className="btn lbl" style={{ height: 38, gridColumn: "1 / -1" }}>Layer attribution</a>

@@ -1,4 +1,4 @@
-"""In-process job runner: long attribution work runs on one worker thread and reports progress.
+"""In-process job runner: captures and long attribution work run on one worker thread and report progress.
 
 The API starts a job and returns at once; the browser follows it over SSE (``wait``) or by polling.
 Cancellation is cooperative: a running job ends at its next ``progress()`` call, which raises ``Cancelled``.
@@ -46,10 +46,12 @@ class Job:
         return {k: getattr(self, k) for k in keys}
 
 
-# ponytail: one worker, in-memory jobs; persist or add GPU/CPU lanes when M4 captures need it.
+# ponytail: one worker, in-memory jobs (captures included); persist or add GPU/CPU lanes when needed.
 class JobRunner:
-    def __init__(self, keep: int = 100):
+    def __init__(self, keep: int = 100, describe: Callable[[Exception], str] | None = None):
+        """``describe`` turns a job's exception into its ``error`` text (default: the exception's message)."""
         self.keep = keep
+        self.describe = describe
         self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._fns: dict[str, Callable[[Progress], Any]] = {}
         self._queue: queue.Queue[str] = queue.Queue()
@@ -134,7 +136,8 @@ class JobRunner:
             except Cancelled:
                 changes = {"status": "cancelled"}
             except Exception as e:  # noqa: BLE001 - any failure is reported on the job
-                changes = {"status": "error", "error": str(e) or type(e).__name__}
+                error = self.describe(e) if self.describe else str(e) or type(e).__name__
+                changes = {"status": "error", "error": error}
             else:
                 changes = {"status": "done", "progress": 1.0, "result": result}
             with self._cond:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import io
+import math
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -26,9 +27,10 @@ from .attribution import (
     unit_label,
 )
 from .capture import capture, patch
+from .errors import ModelUnavailable, describe
 from .graph import module_calls, module_site, module_sites
 from .jobs import Cancelled, Job, JobRunner, Progress
-from .models import LoadedModel, load_model, to_logits
+from .models import LoadedModel, check_spec, load_model, to_logits
 from .store import PREVIEW, RunStore, safe_name
 from .tensors import input_preview
 
@@ -55,7 +57,7 @@ class RunManager:
         self._lock = threading.Lock()  # one capture / attribution at a time (GPU memory)
         self.uploads = store.root / "_uploads"
         self.uploads.mkdir(exist_ok=True)
-        self.jobs = JobRunner()
+        self.jobs = JobRunner(describe=lambda e: describe(e)[1])
 
     # ---- inputs -----------------------------------------------------------
     def save_upload(self, filename: str, data: bytes) -> str:
@@ -75,9 +77,9 @@ class RunManager:
                 x = torch.load(path, map_location="cpu")
                 return x, {"kind": "tensor", "name": sample.get("name") or uid}
             if path.suffix == ".npy":
-                import numpy as np
-
-                x = torch.from_numpy(np.load(path)).float()
+                a = np.load(path)
+                integer = np.issubdtype(a.dtype, np.integer)  # token ids stay int64
+                x = torch.from_numpy(a.astype(np.int64)) if integer else torch.from_numpy(a).float()
                 return x, {"kind": "tensor", "name": sample.get("name") or uid}
             from PIL import Image
 
@@ -92,10 +94,25 @@ class RunManager:
         return torch.randn(*shape, generator=g), {"kind": "random", "name": f"randn{tuple(shape)}"}
 
     # ---- runs -------------------------------------------------------------
-    def create_from_spec(self, spec: str, weights: str | None, sample: dict[str, Any]) -> dict[str, Any]:
-        loaded = load_model(spec, weights, self.device)
+    def create_from_spec(
+        self,
+        spec: str,
+        weights: str | None,
+        sample: dict[str, Any],
+        modules: list[str] | None = None,
+        max_capture_mb: float | None = None,
+        progress: Progress | None = None,
+    ) -> dict[str, Any]:
+        """``progress`` None is the synchronous path (CLI); a capture job passes its progress callback."""
+        report = progress or _quiet
+        report(0.02, "Load model")
+        try:
+            loaded = load_model(spec, weights, self.device)
+        except (ImportError, AttributeError, KeyError, TypeError) as e:
+            raise ValueError(f"Cannot load model {spec!r}: {type(e).__name__}: {e}") from e
+        report(0.08, "Build input")
         x, sample_meta = self.build_input(loaded, sample)
-        return self._create(loaded, x, sample_meta)
+        return self._create(loaded, x, sample_meta, modules, max_capture_mb, progress)
 
     def create_from_objects(
         self,
@@ -103,24 +120,59 @@ class RunManager:
         inputs: Any,
         name: str | None = None,
         categories: list[str] | None = None,
+        modules: list[str] | None = None,
+        max_capture_mb: float | None = None,
+        progress: Progress | None = None,
     ) -> dict[str, Any]:
         loaded = LoadedModel(model=model.eval(), spec=None, weights=None, categories=categories)
         sample_meta = {"kind": "tensor", "name": name or "in-process input"}
-        return self._create(loaded, inputs, sample_meta)
+        return self._create(loaded, inputs, sample_meta, modules, max_capture_mb, progress)
 
-    def _create(self, loaded: LoadedModel, inputs: Any, sample_meta: dict[str, Any]) -> dict[str, Any]:
+    def start_capture(
+        self,
+        spec: str,
+        weights: str | None,
+        sample: dict[str, Any],
+        modules: list[str] | None = None,
+        max_capture_mb: float | None = None,
+    ) -> Job:
+        """Queue a capture job (its result is the run meta) after the checks that need no model."""
+        check_spec(spec)
+        uid = Path(sample.get("upload_id") or "").name
+        if sample.get("kind") == "upload" and not (uid and (self.uploads / uid).is_file()):
+            raise ValueError(f"Upload {sample.get('upload_id')} not found; upload the file again")
+        return self.jobs.submit(
+            "capture", lambda p: self.create_from_spec(spec, weights, sample, modules, max_capture_mb, p)
+        )
+
+    def _create(
+        self,
+        loaded: LoadedModel,
+        inputs: Any,
+        sample_meta: dict[str, Any],
+        modules: list[str] | None = None,
+        max_capture_mb: float | None = None,
+        progress: Progress | None = None,
+    ) -> dict[str, Any]:
+        modules = [m.strip() for m in modules or [] if m.strip()] or None
+        if max_capture_mb is not None and not (math.isfinite(max_capture_mb) and max_capture_mb > 0):
+            raise ValueError(f"max_capture_mb must be a positive finite number, got {max_capture_mb}")
+        budget = int(max_capture_mb * 1024 * 1024) if max_capture_mb else self.max_capture_bytes
         with self._lock:
             run_id = self.store.new_run_id()
             run_dir = self.store.create(run_id)
             try:
                 inputs = _to_device(inputs, self.device)
-                ir = capture(loaded.model, inputs, self.store, run_id, self.max_capture_bytes)
+                ir = capture(loaded.model, inputs, self.store, run_id, budget, modules, progress)
+                (progress or _quiet)(0.93, "Summarise")
                 cpu = _to_device(inputs, "cpu")
                 torch.save(cpu, run_dir / "inputs.pt")
                 preview = _save_preview(cpu, loaded.norm if sample_meta["kind"] == "image" else None, run_dir)
-                top = _top_k(loaded, inputs)
-            except Exception:
+                top, output_error = _top_k(loaded, inputs)
+            except Exception as e:  # Cancelled and CUDA OOM included: no half-written run is left
                 self.store.delete(run_id)
+                if isinstance(e, torch.cuda.OutOfMemoryError):
+                    _free_cuda()
                 raise
             meta = {
                 "id": run_id,
@@ -129,6 +181,7 @@ class RunManager:
                 "sample": sample_meta,
                 "input_shape": _shape(inputs),
                 "output": top,
+                "output_error": output_error,
                 "preview": preview,
                 "categories": loaded.categories,
                 "reloadable": loaded.spec is not None,
@@ -162,11 +215,21 @@ class RunManager:
             return self._live[run_id]
         meta = self.store.meta(run_id)
         if not meta.get("reloadable"):
-            raise RuntimeError(
-                "This run was created in-process and its model is no longer loaded. "
-                "Re-run neurotome.open(model, x) to attribute it."
+            raise ModelUnavailable(
+                "This run was created in-process (neurotome.open) and its model is no longer loaded. Run "
+                "neurotome.open(model, x) again to attribute it; the graph and tensors stay browsable."
             )
-        loaded = load_model(meta["model"]["spec"], meta["model"]["weights"], self.device)
+        spec = meta["model"]["spec"]
+        try:
+            loaded = load_model(spec, meta["model"]["weights"], self.device)
+        except torch.cuda.OutOfMemoryError:
+            raise
+        except Exception as e:  # noqa: BLE001 - a module that moved, a renamed factory, ...
+            raise ModelUnavailable(
+                f"The model of {run_id} ({spec}) can no longer be loaded: {type(e).__name__}: {e}. py: specs "
+                "import from the server's working directory; start neurotome from the folder that holds the "
+                "module, or capture a new run."
+            ) from e
         inputs = torch.load(self.store.run_dir(run_id) / "inputs.pt", map_location=self.device)
         return self._keep_live(run_id, Live(loaded, inputs))
 
@@ -251,7 +314,7 @@ class RunManager:
         where = {o["id"]: o.get("module") or o["id"] for o in ir["ops"]}
         for u in result["top_units"]:
             u["path"] = where.get(u["op"], u["op"])
-        if site:
+        if site and objective:
             result["objective_label"] = unit_label(site[0], int(objective["channel"]))
         channels = result.pop("channel_scores")
         self.store.write_json(run_id, f"attribution/channels_{okey(target, objective)}.json", channels)
@@ -274,7 +337,7 @@ class RunManager:
         if (cached := self._cached(run_id, name)) is not None:
             return cached
         with self._lock:
-            live = self.live(run_id)
+            live = _float_input(self.live(run_id))
             ir = self.store.ir(run_id)
             address, _ = self._layer_site(ir, op)
             fwd, t, label = self._objective(live, ir, target, objective, op)
@@ -307,7 +370,7 @@ class RunManager:
         if (cached := self._cached(run_id, name)) is not None:
             return cached
         with self._lock:
-            live = self.live(run_id)
+            live = _float_input(self.live(run_id))
             ir = self.store.ir(run_id)
             address, _ = self._layer_site(ir, op)
             shape = next(o["shape"] for o in ir["ops"] if o["id"] == op)
@@ -316,6 +379,7 @@ class RunManager:
             fwd, t, label = self._objective(live, ir, target, objective, op)
             model = live.loaded.model
             layer = model.get_submodule(address)
+            t = cast(int, t)  # a logit index or 0 (unit objective), never None here
             attr = channel_conductance(model, _first(live.inputs), layer, channel, fwd, t, steps, progress)
         result = {
             "method": "neuron_cond",
@@ -403,13 +467,13 @@ class RunManager:
             return cached
         report = progress or _quiet
         if baseline == "run":
-            model = self.store.meta(run_id)["model"]
-            other = self.store.meta(source_run)["model"] if self.store.exists(source_run or "") else {}
+            model, src_id = self.store.meta(run_id)["model"], source_run or ""
+            other = self.store.meta(src_id)["model"] if self.store.exists(src_id) else {}
             same = [(m.get("spec"), m.get("weights")) for m in (model, other)]
             if source_run == run_id or model.get("spec") is None or same[0] != same[1]:
                 raise ValueError("source run must be a different run with the same model spec and weights")
             try:
-                src = np.array(self.store.load_tensor(source_run, op))
+                src = np.array(self.store.load_tensor(src_id, op))
             except KeyError as e:
                 raise ValueError(f"source run has no saved tensor for {op}") from e
             replace = lambda t: torch.as_tensor(src, dtype=t.dtype, device=t.device)  # noqa: E731
@@ -538,6 +602,17 @@ def _first(inputs: Any) -> Any:
     return inputs[0] if isinstance(inputs, (tuple, list)) else inputs
 
 
+def _float_input(live: Live) -> Live:
+    """``live`` when its input is a float tensor: layer methods interpolate from a zero baseline."""
+    x = _first(live.inputs)
+    if not (torch.is_tensor(x) and x.is_floating_point()):
+        raise ValueError(
+            "Layer methods interpolate the input from a zero baseline and need a float input; this run's "
+            f"input is {getattr(x, 'dtype', type(x).__name__)}. Embedding-layer methods are planned for v0.2."
+        )
+    return live
+
+
 def _spatial_mean(t: torch.Tensor) -> torch.Tensor:
     """Mean over dims >= 2 (rank >= 3) or over the last dim (rank <= 2), broadcast back to t's shape."""
     dims = tuple(range(2, t.dim())) or (t.dim() - 1,)
@@ -580,14 +655,17 @@ def _shape(inputs: Any) -> list[int] | None:
     return list(x.shape) if torch.is_tensor(x) else None
 
 
-def _top_k(loaded: LoadedModel, inputs: Any, k: int = 5) -> list[dict[str, Any]]:
+def _top_k(loaded: LoadedModel, inputs: Any, k: int = 5) -> tuple[list[dict[str, Any]], str | None]:
+    """(top-k, None), or ([], why) when the output gives no logits: the run is kept either way."""
     try:
         with torch.no_grad():
             args = inputs if isinstance(inputs, (tuple, list)) else (inputs,)
             logits = to_logits(loaded.model(*args))[0].float()
-    except Exception:  # noqa: BLE001 - exotic outputs: skip the summary, keep the run
-        return []
-    return _top_of(logits, loaded.categories, k)
+    except torch.cuda.OutOfMemoryError:
+        raise
+    except Exception as e:  # noqa: BLE001 - exotic outputs: skip the summary, keep the run
+        return [], describe(e)[1]
+    return _top_of(logits, loaded.categories, k), None
 
 
 def _top_of(logits: torch.Tensor, cats: list[str] | None, k: int = 5) -> list[dict[str, Any]]:

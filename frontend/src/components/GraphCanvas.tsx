@@ -3,8 +3,10 @@
 // mode "plain": thin ink edges, tone tint / attribution bar on each node.
 // mode "flow":  edge width = strength of attribution flowing through it, dominant path in accent.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { unsavedText } from "../lib/capture";
 import { compact, displayName, pct, shapeShort } from "../lib/format";
 import { layoutGraph, type Box, type Placed } from "../lib/layout";
+import { useTokens, type Tokens } from "../lib/theme";
 import type { GraphNode, GraphView, NodeTone } from "../lib/types";
 import {
   DOM_MIN_ZOOM, edgeReadout, edgesInView, hitEdge, hitNode, mix, overlaps, step, toGraph, toScreen, viewRect,
@@ -23,20 +25,6 @@ interface Props {
   onToggle?: (call: string, open: boolean) => void; // "+" on module node (open), "−" on group (close)
   onOpen?: (id: string) => void; // Enter on the selected node
   onEscape?: () => void; // Escape while the canvas has focus
-}
-
-export type Tokens = Record<"paper" | "panel" | "ink" | "ink2" | "lineFaint" | "accent" | "accentSoft" | "negative" | "fontMono", string>;
-let tokenCache: Tokens | null = null;
-/** Token values read once from CSS, so canvas and DOM agree. */
-function tokens(): Tokens {
-  if (tokenCache) return tokenCache;
-  const s = getComputedStyle(document.documentElement);
-  const v = (name: string, fallback: string) => s.getPropertyValue(name).trim() || fallback;
-  return (tokenCache = {
-    paper: v("--paper", "#f4f4f1"), panel: v("--panel", "#fafaf8"), ink: v("--ink", "#111111"), ink2: v("--ink-2", "#5e5e59"),
-    lineFaint: v("--line-faint", "#c4c4be"), accent: v("--accent", "#3b4bdb"), accentSoft: v("--accent-soft", "#e6e8fb"),
-    negative: v("--negative", "#d9531e"), fontMono: v("--font-mono", "monospace"),
-  });
 }
 
 const tint = (c: Tokens, v: number) => mix(c.panel, c.accent, 0.08 + 0.32 * v);
@@ -69,7 +57,7 @@ export function GraphCanvas({ view, selected, onSelect, mode = "plain", focus, c
   const seen = useRef<{ focus?: string | null; centre?: number }>({ centre });
   const ptr = useRef<{ x: number; y: number } | null>(null);
   const hoverRaf = useRef(0);
-  const c = useMemo(tokens, []);
+  const c = useTokens();
   const live = useRef({ tf, laid, onSelect, onToggle });
   live.current = { tf, laid, onSelect, onToggle };
 
@@ -282,8 +270,10 @@ export function GraphCanvas({ view, selected, onSelect, mode = "plain", focus, c
         const strong = id === selected || t?.flag;
         ctx.strokeStyle = id === selected ? c.accent : t?.flag ? c.negative : c.ink;
         ctx.lineWidth = (strong ? 1.5 : 1) * px;
+        ctx.setLineDash(n.unsaved && !strong ? [1.5 * px, 1.5 * px] : []);
         ctx.strokeRect(b.x, b.y, b.w, b.h);
       }
+      ctx.setLineDash([]);
     });
     return () => cancelAnimationFrame(id);
   }, [laid, tf, size, tones, hover, selected, mode, c, nodes, pathSet, parentCount]);
@@ -313,7 +303,8 @@ export function GraphCanvas({ view, selected, onSelect, mode = "plain", focus, c
   let readout: Seg[] | null = null;
   if (laid && hover?.node) {
     const n = nodes.get(hover.node), t = tones?.get(hover.node);
-    if (n) readout = [{ t: displayName(n) }, { t: n.type }, { t: shapeShort(n.shape) }, ...(t ? [{ t: t.readout }] : [])];
+    if (n) readout = [{ t: displayName(n) }, { t: n.type }, { t: shapeShort(n.shape) }, ...(t ? [{ t: t.readout }] : []),
+      ...(n.unsaved ? [{ t: `no tensor · ${unsavedText(n.unsaved)}` }] : [])];
   } else if (laid && hover?.edge != null) {
     const e = laid.view.edges[laid.placed.edges[hover.edge]?.i];
     if (e) readout = edgeReadout(e, nodes.get(e.source), nodes.get(e.target));
@@ -425,7 +416,8 @@ const NodeCard = memo(function NodeCard({ n, b, selected, onPath, showBar, tone,
   const hot = selected || onPath;
   const bar = toned ? tone?.v : showBar ? n.score_norm : null;
   const fill = !n.is_output && tone?.v != null ? tint(colors, tone.v) : null;
-  const title = `${n.path}\n${n.type} · ${shapeShort(n.shape)}${tone ? `\n${tone.readout}` : ""}`;
+  const title = `${n.path}\n${n.type} · ${shapeShort(n.shape)}${tone ? `\n${tone.readout}` : ""}`
+    + (n.unsaved ? `\nno tensor · ${unsavedText(n.unsaved)}` : "");
   return (
     <>
       <button type="button" tabIndex={-1} onClick={() => onPick(n.id)} title={title} aria-pressed={selected}
@@ -436,7 +428,7 @@ const NodeCard = memo(function NodeCard({ n, b, selected, onPath, showBar, tone,
           background: n.is_output ? "var(--ink)" : fill ?? (hot ? "var(--accent-soft)" : "var(--panel)"),
           color: n.is_output ? "var(--panel)" : "var(--ink)",
           border: selected ? "1.5px solid var(--accent)" : tone?.flag ? "1.5px solid var(--negative)"
-            : n.is_input ? "1px dashed var(--ink)" : onPath ? "1px solid var(--accent)" : "1px solid var(--ink)",
+            : n.is_input ? "1px dashed var(--ink)" : onPath ? "1px solid var(--accent)" : n.unsaved ? "1px dotted var(--ink)" : "1px solid var(--ink)",
           boxShadow: n.kind === "module" ? "4px 4px 0 -1px var(--paper), 4px 4px 0 0 var(--ink)" : "none",
         }}>
         <span style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
@@ -445,7 +437,7 @@ const NodeCard = memo(function NodeCard({ n, b, selected, onPath, showBar, tone,
           </span>
           {tone?.flag
             ? <span className="lbl" style={{ fontSize: 9.5, color: "var(--negative-text)", whiteSpace: "nowrap" }}>NAN/INF</span>
-            : <span className="num" style={{ fontSize: 9.5, color: n.is_output ? "inherit" : "var(--ink-2)", whiteSpace: "nowrap", marginRight: onExpand ? 8 : 0 }}>{shapeShort(n.shape)}</span>}
+            : <span className="num" style={{ fontSize: 9.5, color: n.is_output ? "inherit" : "var(--ink-2)", whiteSpace: "nowrap", marginRight: onExpand ? 8 : 0 }}>{n.unsaved ? `∅ ${shapeShort(n.shape)}` : shapeShort(n.shape)}</span>}
         </span>
         <span style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>
         {bar != null && !n.is_output && (

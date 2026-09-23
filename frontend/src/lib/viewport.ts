@@ -1,6 +1,7 @@
 // Pure viewport maths for GraphCanvas and Minimap: culling, hit testing, keyboard steps, colour mixing.
 // ponytail: linear scans per frame are fine to ~20k nodes; add a grid index if the benchmark says otherwise.
 import { displayName, shapeShort } from "./format";
+import { parseColor } from "./theme";
 import type { Box, Placed } from "./layout";
 import type { GraphEdge, GraphNode, GraphView } from "./types";
 
@@ -88,10 +89,10 @@ export function step(view: GraphView, placed: Placed, current: string | null, ke
   return best;
 }
 
-/** Linear blend of two "#rrggbb" colours. */
+/** Linear blend of two colours ("#rgb", "#rrggbb", "rgb()"), as "#rrggbb". */
 export function mix(a: string, b: string, t: number): string {
-  const p = (s: string, i: number) => parseInt(s.slice(1 + 2 * i, 3 + 2 * i), 16);
-  return "#" + [0, 1, 2].map((i) => Math.round(p(a, i) + (p(b, i) - p(a, i)) * t).toString(16).padStart(2, "0")).join("");
+  const x = parseColor(a), y = parseColor(b);
+  return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, "0")).join("");
 }
 
 export interface Seg { t: string; hi?: boolean }

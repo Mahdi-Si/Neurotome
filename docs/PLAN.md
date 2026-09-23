@@ -91,6 +91,17 @@ comparison, training-time monitoring, multi-user hosting, JAX and TensorFlow.
 - ResNet-50 capture on CPU in under 10 s; tensor views in under 300 ms; IG with 32 steps in under 30 s on CPU.
 - 5 external users use it on their own model without code changes to Neurotome.
 
+**Measured** on 23 September 2026 with `python scripts/bench.py` (CPU, random weights, temp runs dir):
+
+| Metric | Value | Budget | Pass |
+|---|---|---|---|
+| `capture_resnet50_s` (ResNet-50 capture, model build included) | 2.56 s | < 10 s | yes |
+| `tensor_view_p95_ms` (p95 of `GET …/tensor` over all 177 saved ops) | 165 ms | < 300 ms | yes |
+| `ig32_s` (Integrated Gradients, 32 steps) | 4.19 s | < 30 s | yes |
+
+Machine: 13th Gen Intel Core i7-13800H, 14 torch threads (20 logical CPUs), torch 2.14.0, Python 3.12.1, Windows 11.
+Four runs that day ranged 2.2–3.8 s, 165–206 ms and 4.0–4.2 s (other work shared the machine).
+
 ## 6. Architecture (summary)
 
 ```
@@ -157,12 +168,13 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 
 ### M4 · Hardening and release (≈1 week)
 
-- [ ] Background job queue for captures (the generic runner, SSE progress and cancel landed in M3 for attribution, layer, agreement and patch jobs: `jobs.py`)
-- [ ] Capture budget UI: show when `NEUROTOME_MAX_CAPTURE_MB` truncated a run; selective capture by module
-- [ ] Error states for unsupported ops, non-tensor outputs, integer inputs
-- [ ] Dark theme (token-driven; charts re-validated against the dark surface)
-- [ ] Build: `pip wheel` includes the UI; publish to PyPI; versioned docs site
-- [ ] Browser end-to-end tests (Playwright) over the four views; benchmark script for the success criteria
+- [x] Background job queue for captures: `POST /api/runs` returns 202 and a `capture` job (Load model, Build input, Trace, Save tensors i/N, Summarise) followed over SSE; Home shows the progress bar and Cancel, then opens the run. The CLI and `neurotome.open()` stay synchronous
+- [x] Capture budget UI and selective capture: "never cross" budget rule, Truncated / Selective banner in the graph and tensor views, dotted `∅` nodes without a tensor (stats still computed for every op), `modules` and a per-run budget in the form, the API and `neurotome capture --modules --max-capture-mb`
+- [x] Error states: `errors.describe()` maps trace failures (422), non-tensor or integer outputs, integer inputs (input attribution skipped with a note; layer methods refuse), missing tensors (404 with the reason), models that can no longer be loaded (409), no-gradient models (400) and CUDA out-of-memory (413, suggests CPU or a smaller budget); the UI shows the message, never a traceback
+- [x] Dark theme (token-driven, follows `prefers-color-scheme`, toggle in the top bar stored in `localStorage`; canvases, charts and PNG exports read tokens at draw time; contrast recorded in DESIGN.md), plus the reduced-motion and forced-colours passes
+- [x] Build: the wheel and sdist carry the UI (`scripts/check_wheel.py --install` checks a clean venv); PyPI release workflow with trusted publishing behind the `pypi` environment and a versioned mkdocs-material + mike docs site are **prepared, not published** (see RELEASE.md)
+- [x] Browser end-to-end tests (Playwright, `npm run e2e`, CI job) over the four views; `scripts/bench.py` for the success criteria (§5)
+- [x] Type-check hygiene: `pyrightconfig.json`, `pyright backend/neurotome` at 0 errors in CI, LF line endings
 
 **MVP total: about 6–7 weeks** after this starter.
 
@@ -172,7 +184,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 |---|---|---|
 | v0.2 | Sequences and LLMs | Token input box; Hugging Face models; attention-pattern viewer; logit lens; LayerIntegratedGradients on embeddings; NNsight capture backend for large models |
 | v0.3 | Interventions | Zero/mean/resample ablation, activation patching and steering from the UI; before/after diff of every downstream node |
-| v0.4 | Scale | Streaming capture to chunked storage (zarr); selective capture; remote GPU server; optional NDIF backend for very large models |
+| v0.4 | Scale | Streaming capture to chunked storage (zarr); selective capture during the trace (M4 selects what reaches disk); remote GPU server; optional NDIF backend for very large models |
 | v0.5 | Comparison | Two samples or two checkpoints side by side; dataset-level channel statistics; float vs quantized error overlay |
 | v1.0 | Ecosystem | Jupyter widget; plugin API for custom tensor viewers and attribution methods; static shareable export; circuit-tracer import |
 
@@ -196,4 +208,4 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 
 ## 11. Getting started
 
-See the [README](../README.md): `make install`, then `make dev`, then open http://localhost:5173.
+See [Getting started](index.md) for install, first run, CLI flags and configuration; the repository README has the development setup (`uv` or `make`) and the test, e2e, wheel, docs and benchmark commands.

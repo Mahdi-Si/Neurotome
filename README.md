@@ -10,35 +10,15 @@ tensor as maps, signals or projections. It also traces which parts of the model 
 |---|---|
 | ![Tensor inspector](docs/screenshots/tensors.png) | ![Attribution trace](docs/screenshots/trace.png) |
 
-> Status: **v0.1 starter.** The full pipeline works end to end. See [docs/PLAN.md](docs/PLAN.md) for
-> the MVP scope, roadmap and step-by-step implementation plan.
+> Status: **MVP**, in release preparation. The full pipeline works end to end. See the
+> [Getting started](docs/index.md) page, [docs/PLAN.md](docs/PLAN.md) for the MVP scope and roadmap, and
+> [docs/RELEASE.md](docs/RELEASE.md) for how a version reaches PyPI.
 
 ## Quick start
 
-Requirements: Python 3.10+, Node 20+.
+Requirements: Python 3.10+, Node 20+, [uv](https://docs.astral.sh/uv/). `make` is optional.
 
-```bash
-make install        # Python venv + editable backend + npm packages
-make dev            # API on :7070 and UI on :5173 (hot reload)
-# open http://localhost:5173 → "Capture forward pass"
-```
-
-Without `make`:
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e "./backend[dev]"
-cd frontend && npm install && cd ..
-neurotome serve --reload &          # API :7070
-cd frontend && npm run dev          # UI  :5173
-```
-
-**GPU / CPU-only PyTorch.** `pip` installs the default PyTorch build for your platform. For a specific
-CUDA version or a small CPU-only build, install torch first by following https://pytorch.org, then run `make install`.
-
-### Windows
-
-`make` is optional; with [uv](https://docs.astral.sh/uv/) and PowerShell:
+**Windows (PowerShell)**
 
 ```powershell
 uv venv .venv
@@ -47,7 +27,27 @@ cd frontend; npm ci; cd ..
 .\scripts\dev.ps1                   # API :7070 (reload) + UI :5173; Ctrl+C stops both
 ```
 
-The Makefile also works with a Windows venv (`.venv/Scripts`) if you have `make` from Git Bash or MSYS2.
+**Linux / macOS**
+
+```bash
+uv venv .venv
+uv pip install --python .venv/bin/python -e "./backend[dev]"
+(cd frontend && npm ci)
+./scripts/dev.sh                    # API :7070 (reload) + UI :5173; Ctrl+C stops both
+```
+
+Open http://localhost:5173 and press **Capture forward pass** (try the model `py:examples.custom_model:build`).
+
+**GPU / CPU-only PyTorch.** The install above takes the default PyTorch build for your platform. For a specific
+CUDA version or a small CPU-only build, install torch first (e.g.
+`uv pip install --python <venv python> torch torchvision --index-url https://download.pytorch.org/whl/cpu`).
+
+**With `make`** (Git Bash, MSYS2, Linux, macOS; works with `.venv/Scripts` or `.venv/bin`):
+
+```bash
+make install        # Python venv + editable backend + npm packages
+make dev            # API on :7070 and UI on :5173 (hot reload)
+```
 
 ### From Python or a notebook
 
@@ -62,15 +62,34 @@ neurotome.open(model, x, block=False)  # notebooks: server runs in the backgroun
 ```bash
 neurotome capture torchvision:resnet18 --weights DEFAULT --image cat.jpg
 neurotome capture py:examples.custom_model:build   # your own model (see examples/custom_model.py)
+neurotome capture torchvision:resnet50 --modules layer3,layer4 --max-capture-mb 512   # selective, budgeted
 neurotome serve                                    # serves the built UI + API on :7070
 ```
 
-### Single-process build
+### Single-process build and the wheel
 
 ```bash
-make build          # builds the UI into backend/neurotome/static
-neurotome serve     # UI and API together on http://127.0.0.1:7070
+cd frontend && npm run build && cd ..    # builds the UI into backend/neurotome/static
+neurotome serve                          # UI and API together on http://127.0.0.1:7070
+uv build backend                         # backend/dist/neurotome-<v>.tar.gz and -py3-none-any.whl (UI included)
+python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.gz" [--install]
 ```
+
+`--install` also installs the wheel into a fresh temp venv (CPU torch) and checks that it serves the UI.
+
+## Capture
+
+- **Background job**: the Home form starts a capture job (Load model → Build input → Trace → Save tensors i/N →
+  Summarise) with a progress bar and `Cancel`, then opens the graph. `neurotome capture` and `neurotome.open()`
+  stay synchronous.
+- **Budget**: tensors are saved until the next one would exceed the budget (`NEUROTOME_MAX_CAPTURE_MB`, default
+  2048, or `Budget · MB` per run); later ops keep their stats but no tensor. A `Truncated` banner says so and those
+  nodes are drawn dotted with `∅`.
+- **Selective**: `Modules` (e.g. `layer3, layer4`) saves tensors only inside those modules; the whole graph is still
+  recorded (`Selective` banner).
+- **Errors** are specific and never a traceback: trace failures, outputs with no tensor, integer inputs (input
+  attribution is skipped with a note), missing tensors, models that can no longer be loaded, CUDA out of memory.
+- **Theme**: light or dark, following the system until you pick one with the toggle in the top bar.
 
 ## Graph workspace
 
@@ -121,26 +140,37 @@ neurotome serve     # UI and API together on http://127.0.0.1:7070
 
 ```
 backend/            Python package `neurotome` (FastAPI, TorchLens, Captum)
-  neurotome/        capture.py · graph.py · tensors.py · slicing.py · attribution.py · jobs.py · runs.py · api.py · cli.py
+  neurotome/        capture.py · graph.py · tensors.py · slicing.py · attribution.py · jobs.py · runs.py · errors.py · api.py · cli.py
   tests/            end-to-end tests (tiny model + ResNet-18)
 frontend/           Vite + React + TypeScript UI
+  e2e/              Playwright specs (home · graph · tensors · trace) and the server global setup
   src/views/        Home · Graph · Tensors · Trace
   src/components/   GraphCanvas (ELK worker, canvas edges), Minimap, GraphSearch, charts, panels,
                     InputOverlay, ValuesTable, ComparePanel, PatchPanel, JobProgress, AgreementMatrix
   src/lib/          pure logic: layout, viewport, graphState, tensorState, traceState, jobs, exportPng (tested with vitest)
 design/             tokens.json + the canvas mockups that set the visual direction
-docs/               PLAN.md (MVP + roadmap + steps) · ARCHITECTURE.md · DESIGN.md · screenshots
+docs/               index.md (Getting started) · PLAN.md · ARCHITECTURE.md · DESIGN.md · RELEASE.md · specs/ (mkdocs.yml)
 examples/           quickstart.py · custom_model.py
+scripts/            dev.sh · dev.ps1 · bench.py · check_wheel.py
 ```
 
 ## Commands
 
+Run from the repository root with the venv's Python (`.venv\Scripts\python.exe` on Windows, `.venv/bin/python`
+elsewhere); the Makefile target is in brackets.
+
 | | |
 |---|---|
-| `make test` | backend pytest + frontend typecheck and vitest |
-| `make build` | production UI into the Python package |
-| `make serve` | run the packaged server |
+| `cd backend && python -m pytest -q` | backend tests [`make test-backend`; `make test` adds the frontend] |
+| `cd backend && python -m ruff check .` | lint [`make lint`] |
+| `cd frontend && npm run typecheck && npm test` | frontend typecheck and vitest [`make test-frontend`] |
+| `cd frontend && npm run e2e` | builds the UI, starts `neurotome serve` (CPU, temp runs dir, free port) and runs the Playwright suite over the four views [`make e2e`]; first time: `npx playwright install chromium` |
+| `uv build backend` | sdist and wheel with the UI [`make wheel`, which also builds the UI and checks the wheel] |
+| `python scripts/bench.py` | benchmarks for the success criteria (ResNet-50 capture, tensor view p95, IG-32 on CPU) [`make bench`] |
+| `mkdocs serve` | docs site on http://127.0.0.1:8000 (`pip install -e "./backend[docs]"`); `mkdocs build --strict` [`make docs`] |
 | `make clean` | remove builds, caches and local runs |
+
+Releasing: [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Configuration
 
