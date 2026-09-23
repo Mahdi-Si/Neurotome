@@ -81,7 +81,11 @@ def graph_view(
     scores: dict[str, float] | None = None,
     expand: Iterable[str] = (),
     collapse: Iterable[str] = (),
+    merges: dict[str, dict[str, float]] | None = None,
+    start: str | None = None,
 ) -> dict[str, Any]:
+    """``merges`` (op_gradients) turns merge shares into flow through the merge; ``start`` is the op the
+    dominant path starts from (a unit objective), else the output."""
     ops = {o["id"]: o for o in ir["ops"]}
     order = [o["id"] for o in ir["ops"]]
     pos = {oid: i for i, oid in enumerate(order)}
@@ -202,12 +206,14 @@ def graph_view(
 
     # 4. edges between visible nodes
     edges: dict[tuple[str, str], dict[str, Any]] = {}
+    pairs: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)  # every (parent, child) op pair
     for oid in order:
         t = node_of[oid]
         for p in ops[oid]["parents"]:
             s = node_of.get(p)
             if s is None or s == t:
                 continue
+            pairs[(s, t)].append((p, oid))
             if (s, t) in edges:
                 continue
             dtype, device = _meta(ops[p])
@@ -224,7 +230,7 @@ def graph_view(
 
     view = {"depth": depth, "nodes": nodes, "edges": list(edges.values()), "groups": groups}
     if scores is not None:
-        attach_scores(view, scores)
+        attach_scores(view, scores, merges, pairs, start, node_of)
     return view
 
 
@@ -254,8 +260,21 @@ def search_index(ir: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def attach_scores(view: dict[str, Any], scores: dict[str, float]) -> None:
-    """Add attribution to a view: node score, per-edge share and the dominant backward path."""
+def attach_scores(
+    view: dict[str, Any],
+    scores: dict[str, float],
+    merges: dict[str, dict[str, float]] | None = None,
+    pairs: dict[tuple[str, str], list[tuple[str, str]]] | None = None,
+    start: str | None = None,
+    node_of: dict[str, str] | None = None,
+) -> None:
+    """Add attribution to a view: node score, per-edge share and the dominant backward path.
+
+    At a node with several incoming edges, an edge's share is its flow through the merge
+    (Σ |merges[child][parent]| over its op pairs, ``share_method: merge``) when every incoming edge has
+    such a pair; otherwise all of that node's edges fall back to |parent score| / Σ
+    (``share_method: parent``).
+    """
     by_id = {n["id"]: n for n in view["nodes"]}
     for n in view["nodes"]:
         n["score"] = scores.get(n["output_op"])
@@ -267,15 +286,29 @@ def attach_scores(view: dict[str, Any], scores: dict[str, float]) -> None:
     parents: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for e in view["edges"]:
         parents[e["target"]].append(e)
-    for es in parents.values():
-        mags = [abs(by_id[e["source"]].get("score") or 0.0) for e in es]
+    merges, pairs = merges or {}, pairs or {}
+    for t, es in parents.items():
+        if len(es) == 1:
+            es[0]["share"] = 1.0
+            continue
+        flows = [[abs(merges[c][p]) for p, c in pairs.get((e["source"], t), []) if p in merges.get(c, {})]
+                 for e in es]  # fmt: skip
+        method = "merge" if all(flows) and sum(map(sum, flows)) > 0 else "parent"
+        if method == "merge":
+            mags = [sum(f) for f in flows]
+        else:
+            mags = [abs(by_id[e["source"]].get("score") or 0.0) for e in es]
         total = sum(mags)
         for e, m in zip(es, mags, strict=True):
             e["share"] = (m / total) if total else (1.0 / len(es))
+            if by_id[t].get("score"):  # no flow reaches t (after a unit objective): no split
+                e["share_method"] = method
 
     # greedy walk from the output back to the input along the strongest parent
     path = []
     cur = next((n["id"] for n in view["nodes"] if n["is_output"]), None)
+    if start is not None and node_of and start in node_of:
+        cur = node_of[start]
     guard = 0
     while cur is not None and guard < len(by_id):
         path.append(cur)
@@ -286,3 +319,31 @@ def attach_scores(view: dict[str, Any], scores: dict[str, float]) -> None:
     for e in view["edges"]:
         e["on_path"] = (e["source"], e["target"]) in on_path
     view["path"] = path
+
+
+def module_sites(ir: dict[str, Any], op_id: str) -> list[tuple[str, int]]:
+    """Every (module address, call index) whose output is ``op_id``, innermost first: the calls in the op's
+    stack for which it is the last op with a child outside the call. This covers leaf modules, BatchNorm
+    (module is null) and collapsed module nodes, whose ``output_op`` is the block's last op."""
+    ops = {o["id"]: o for o in ir["ops"]}
+    if op_id not in ops:
+        return []
+    ops_in_call = _ops_in_call(ir)
+    out = []
+    for call in reversed(ops[op_id]["modules"]):
+        members = set(ops_in_call[call])
+        leaving = [m for m in ops_in_call[call] if any(ch not in members for ch in ops[m]["children"])]
+        if leaving and leaving[-1] == op_id:
+            addr, _, n = call.rpartition(":")
+            out.append((addr, int(n)))
+    return out
+
+
+def module_site(ir: dict[str, Any], op_id: str) -> tuple[str, int] | None:
+    """The innermost (module address, call index) whose output is ``op_id``, else None."""
+    return next(iter(module_sites(ir, op_id)), None)
+
+
+def module_calls(ir: dict[str, Any], address: str) -> int:
+    """How many distinct calls of the module at ``address`` the IR holds."""
+    return len({c for o in ir["ops"] for c in o["modules"] if strip_call(c) == address})

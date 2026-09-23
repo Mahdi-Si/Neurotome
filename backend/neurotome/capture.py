@@ -29,7 +29,7 @@ IR schema (ir.json)::
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import numpy as np
@@ -195,23 +195,45 @@ def capture(
     return ir
 
 
-def op_gradients(model: torch.nn.Module, inputs: Any, target: int | None, to_logits) -> dict[str, Any]:
-    """Re-trace with gradients and return per-op gradient × activation for one output logit.
+def op_gradients(
+    model: torch.nn.Module, inputs: Any, target: int | None, to_logits, objective: dict | None = None
+) -> dict[str, Any]:
+    """Re-trace with gradients and return per-op gradient × activation for one objective.
 
-    Returns ``{"target", "logit", "scores": {op_id: signed sum(act*grad)},
-    "channel_scores": {op_id: [per-channel sums]}}`` for ops whose output has a channel axis.
+    ``objective`` None: back-propagate ``logits[0, target]`` (target None -> argmax).
+    ``objective`` ``{"op": op_id, "channel": c}``: back-propagate ``first_tensor(op.out)[0, c].sum()``;
+    ops downstream of the unit get no gradient and so no score.
+
+    Returns ``{"target", "logit", "value", "scores": {op_id: signed sum(act*grad)},
+    "channel_scores": {op_id: [per-channel sums]}, "merges": {child_op: {parent_op: float}}}``.
+    ``value`` is the back-propagated scalar; ``target`` / ``logit`` are None for a unit objective.
+    ``merges`` holds, for every op with >= 2 visible parents, each parent's grad × input *through that op*.
+    For linear merges (add, sub, cat, stack) the contributions of an op sum to its own grad × act score.
     """
     model.eval()
     trace = _run_trace(model, inputs, save_grads=True)
     ops = _visible_ops(trace)
     by_obj, _ = _id_maps(ops)
-    out_op = next(op for op in ops if op.is_output)
-    logits = to_logits(_first_tensor(out_op.out))
-    if target is None:
-        target = int(logits[0].detach().argmax())
+    logit = None
+    if objective is None:
+        out_op = next(op for op in ops if op.is_output)
+        logits = to_logits(_first_tensor(out_op.out))
+        if target is None:
+            target = int(logits[0].detach().argmax())
+        root = logits[0, target]
+        logit = float(root.detach())
+    else:
+        op_id, c = objective["op"], int(objective["channel"])
+        unit = next((op for op in ops if by_obj[id(op)] == op_id), None)
+        out = _first_tensor(_safe(lambda: unit.out)) if unit is not None else None
+        if out is None:
+            raise ValueError(f"Unknown op {op_id}")
+        if out.dim() < 2 or not 0 <= c < out.shape[1]:
+            raise ValueError(f"Channel {c} out of range for {op_id} with shape {list(out.shape)}")
+        target, root = None, out[0, c].sum()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        trace.log_backward(logits[0, target])
+        trace.log_backward(root)
 
     scores: dict[str, float] = {}
     channel_scores: dict[str, list[float]] = {}
@@ -225,10 +247,139 @@ def op_gradients(model: torch.nn.Module, inputs: Any, target: int | None, to_log
         scores[oid] = float(gxa.sum())
         if gxa.dim() >= 3:  # (B, C, ...) -> per channel
             channel_scores[oid] = gxa[0].flatten(1).sum(1).tolist()
-    result = {
+    return {
         "target": target,
-        "logit": float(logits[0, target].detach()),
+        "logit": logit,
+        "value": float(root.detach()),
         "scores": scores,
         "channel_scores": channel_scores,
+        "merges": _merges(trace, ops, by_obj),
     }
-    return result
+
+
+def _merges(trace, ops: list, by_obj: dict[int, str]) -> dict[str, dict[str, float]]:
+    every: dict[str, Any] = {}  # TorchLens label -> op, buffers included
+    for op in trace.layer_list:
+        every[op.label] = op
+        if (_safe(lambda op=op: op.num_passes, 1) or 1) == 1:
+            every[op.layer_label] = op
+    out = {}
+    for op in ops:
+        try:
+            m = _merge(op, every, by_obj)
+        except Exception:  # noqa: BLE001 - an op that cannot be re-called falls back to parent shares
+            continue
+        if m:
+            out[by_obj[id(op)]] = m
+    return out
+
+
+def _merge(op, every: dict[str, Any], by_obj: dict[int, str]) -> dict[str, float] | None:
+    """Each visible parent's grad × input through ``op``: re-call op.func on cloned parent leaves."""
+    grad = _first_tensor(_safe(lambda: op.grad))
+    parents = {k: every[label] for k, label in op.parent_arg_positions["args"].items()}
+    if grad is None or len({by_obj[id(p)] for p in parents.values() if id(p) in by_obj}) < 2:
+        return None
+    leaves: dict[str, torch.Tensor] = {}
+    slots: dict[int, Any] = {}
+    for k, p in parents.items():
+        t = _first_tensor(p.out).detach()
+        if id(p) in by_obj:  # visible parent -> one leaf per op; buffers stay constants
+            t = leaves.setdefault(by_obj[id(p)], t.clone().requires_grad_(True)).clone()  # in-place funcs
+        if isinstance(k, tuple):  # (i, j): element j of a list at position i, e.g. cat([a, b])
+            slots.setdefault(k[0], {})[k[1]] = t
+        else:
+            slots[k] = t
+    rest = iter(op.non_tensor_pos_args)
+    args = [
+        ([v for _, v in sorted(slots[i].items())] if isinstance(slots[i], dict) else slots[i])
+        if i in slots
+        else next(rest)  # params are not recorded here: too few args -> StopIteration -> skipped
+        for i in range(op.num_pos_args)
+    ]
+    if next(rest, rest) is not rest:
+        return None
+    with torch.enable_grad():
+        y = _first_tensor(op.func(*args, **op.non_tensor_kwargs))
+        grads = torch.autograd.grad(y, list(leaves.values()), grad.to(y.dtype), allow_unused=True)
+    return {
+        pid: 0.0 if g is None else float((g.detach() * leaf.detach()).float().sum())
+        for (pid, leaf), g in zip(leaves.items(), grads, strict=True)
+    }
+
+
+def patch(
+    model: torch.nn.Module,
+    inputs: Any,
+    op_id: str,
+    replace: Callable[[torch.Tensor], torch.Tensor],
+    keep: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Re-run the forward pass with op_id's output replaced (TorchLens DAG replay).
+
+    Returns ``{"deltas": {op: ||after - before||_2},
+    "rel": {op: ||delta|| / ||before|| (0 when ||before|| = 0)},
+    "after": {op: tensor for op in keep}, "logits_after": first tensor of the output op}``.
+    """
+    import torchlens as tl
+
+    model.eval()
+    args = list(inputs) if isinstance(inputs, (tuple, list)) else inputs
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, args, layers_to_save="all", intervention_ready=True, unwrap_when_done=True)
+    ops = _visible_ops(trace)
+    by_obj, by_label = _id_maps(ops)
+    before: dict[str, torch.Tensor] = {}
+    for op in ops:
+        t = _first_tensor(_safe(lambda op=op: op.out))
+        if t is not None:
+            before[by_obj[id(op)]] = t.detach().clone()  # before the replay mutates anything
+    op = next((o for o in ops if by_obj[id(o)] == op_id), None)
+    if op is None or op_id not in before:
+        raise ValueError(f"Unknown op {op_id}")
+    new = replace(before[op_id])
+    if tuple(new.shape) != tuple(before[op_id].shape):
+        raise ValueError(f"replacement shape {list(new.shape)} != {list(before[op_id].shape)}")
+    label = op.layer_label if op_id == op.layer_label else op.label  # .pN ids -> pass-qualified label
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace.do(tl.label(label), tl.replace_with(new), engine="replay", confirm_mutation=True)
+
+    # Replay re-runs in-place funcs (x += y, ReLU(inplace)) on their parents' tensors, so an op whose tensor a
+    # later in-place op mutates reads that op's value. Ops outside the patched op's descendants cannot change
+    # (delta 0); a mutated descendant's own value is lost, so it is left out.
+    down, todo = {op_id}, [op]
+    while todo:
+        for c in _safe(lambda o=todo.pop(): o.children, []) or []:
+            if (cid := by_label.get(c)) and cid not in down:
+                down.add(cid)
+                todo.append(next(o for o in ops if by_obj[id(o)] == cid))
+    outs = [(by_obj[id(o)], _first_tensor(_safe(lambda o=o: o.out))) for o in ops]
+    lost, mutated = set(), set()
+    for o, (oid, t) in zip(reversed(ops), reversed(outs), strict=True):
+        if t is not None:
+            if t.data_ptr() in mutated:
+                lost.add(oid)
+            if _safe(lambda o=o: o.is_inplace, False):
+                mutated.add(t.data_ptr())
+
+    keep = set(keep)
+    deltas: dict[str, float] = {}
+    rel: dict[str, float] = {}
+    after: dict[str, torch.Tensor] = {}
+    for oid, a in outs:
+        b = before.get(oid)
+        if a is None or b is None or a.shape != b.shape or not b.is_floating_point():
+            continue
+        if oid not in down:
+            a = b
+        elif oid in lost:
+            continue
+        a = a.detach()
+        d, n = float((a.float() - b.float()).norm()), float(b.float().norm())
+        deltas[oid], rel[oid] = d, (d / n if n else 0.0)
+        if oid in keep:
+            after[oid] = a.clone()
+    out_op = next(o for o in ops if o.is_output)
+    return {"deltas": deltas, "rel": rel, "after": after, "logits_after": _first_tensor(out_op.out).detach()}

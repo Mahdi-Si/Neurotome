@@ -1,6 +1,6 @@
 // Pure graph-workspace state: fold overrides in the URL, search ranking, colour modes.
 import { num, pct, shape, shapeShort } from "./format";
-import type { ColorMode, Fold, GraphView, IndexEntry, NodeTone, Stats } from "./types";
+import type { Baseline, ColorMode, Fold, GraphView, IndexEntry, NodeTone, PatchResult, Stats } from "./types";
 
 const list = (s: string | null) => (s ?? "").split(",").filter(Boolean);
 const uniq = (a: string[]) => [...new Set(a)];
@@ -56,9 +56,26 @@ export function searchIndex(entries: IndexEntry[], q: string, limit = 8): IndexE
 
 export function colorMode(params: URLSearchParams): ColorMode {
   const c = params.get("color");
-  if (c === "attr" || c === "norm" || c === "sparsity" || c === "nan") return c;
+  if (c === "attr" || c === "norm" || c === "sparsity" || c === "nan" || c === "patch") return c;
   return params.get("overlay") === "attr" ? "attr" : "plain";
 }
+
+export interface PatchState { op: string; baseline: Baseline; source: string | null }
+
+/** URL patch=<op>&pb=zeros|mean|run&psrc=<run>; pb defaults to zeros, psrc is only read for run (and required). */
+export function parsePatch(params: URLSearchParams): PatchState | null {
+  const op = params.get("patch");
+  const pb = params.get("pb");
+  const baseline: Baseline = pb === "mean" || pb === "run" ? pb : "zeros";
+  const source = baseline === "run" ? params.get("psrc") : null;
+  return op && (baseline !== "run" || source) ? { op, baseline, source } : null;
+}
+
+export const patchParams = (p: PatchState | null) => ({
+  patch: p?.op ?? null,
+  pb: p && p.baseline !== "zeros" ? p.baseline : null,
+  psrc: p?.baseline === "run" ? p.source : null,
+});
 
 /** RMS over finite values, exact from population mean and std. */
 export const rms = (st: Stats | null | undefined) =>
@@ -66,8 +83,21 @@ export const rms = (st: Stats | null | undefined) =>
 
 export interface Legend { title: string; lo: string; hi: string; note?: string }
 
-export function nodeTones(view: GraphView, mode: ColorMode): { tones?: Map<string, NodeTone>; legend: Legend | null } {
+export function nodeTones(view: GraphView, mode: ColorMode, patch?: PatchResult | null): { tones?: Map<string, NodeTone>; legend: Legend | null } {
   const tones = new Map<string, NodeTone>();
+  if (mode === "patch") {
+    if (!patch) return { legend: null };
+    // normalise by the largest change elsewhere; the patched node itself would always be rel 1
+    const own = view.nodes.find((n) => n.output_op === patch.op)?.id;
+    const max = Math.max(0, ...view.nodes.filter((n) => n.id !== own).map((n) => patch.rel[n.output_op] ?? 0));
+    for (const n of view.nodes) {
+      const r = patch.rel[n.output_op];
+      tones.set(n.id, n.id === own ? { v: 1, readout: `patched · ${patch.baseline}` }
+        : r == null ? { v: null, readout: "‖Δ‖ —" }
+        : { v: max > 0 ? Math.min(1, Math.max(0, r / max)) : 0, readout: `‖Δ‖ ${num(patch.deltas[n.output_op])} · rel ${pct(r)}` });
+    }
+    return { tones, legend: { title: `Patch Δ = ‖after − before‖ / ‖before‖ · ${patch.path} → ${patch.baseline}`, lo: "0", hi: pct(max) } };
+  }
   if (mode === "attr") {
     for (const n of view.nodes) tones.set(n.id, { v: n.score_norm ?? null, readout: `|g×a| ${num(n.score, 3)}` });
     return { tones, legend: { title: "Node = |grad × act| · gxa · target top", lo: "0", hi: "max" } };

@@ -66,11 +66,15 @@ def _default_image_preprocess(size: int = 224) -> Callable[[Any], torch.Tensor]:
 
 
 def load_model(spec: str, weights: str | None = None, device: str = "cpu") -> LoadedModel:
+    """Random-init weights are seeded, so a spec reloads to the same model it was captured with
+    (attribution after a restart, patching from another run of the same spec)."""
     kind, _, rest = spec.partition(":")
-    if kind == "torchvision":
-        return _load_torchvision(rest, weights, device)
-    if kind == "py":
-        return _load_python(rest, device)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        if kind == "torchvision":
+            return _load_torchvision(rest, weights, device)
+        if kind == "py":
+            return _load_python(rest, device)
     raise ValueError(f"Unknown model spec {spec!r}. Use 'torchvision:<name>' or 'py:<module>:<factory>'.")
 
 

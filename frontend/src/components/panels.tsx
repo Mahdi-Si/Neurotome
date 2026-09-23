@@ -4,9 +4,11 @@ import { fileName } from "../lib/exportPng";
 import { compact, displayName, dtypeShort, num, pct, shape, shapeShort } from "../lib/format";
 import { rms } from "../lib/graphState";
 import { href } from "../lib/router";
+import { traceParams } from "../lib/traceState";
 import type { GraphNode, GraphView, ModuleEntry } from "../lib/types";
 import { Histogram } from "./charts";
 import { Crosshair, IconSearch } from "./Icons";
+import { PatchPanel, type PatchProps } from "./PatchPanel";
 
 export function ModuleTree({ modules, selectedPath, onPick }: {
   modules: ModuleEntry[]; selectedPath: string | null; onPick: (address: string) => void;
@@ -51,8 +53,8 @@ export function ModuleTree({ modules, selectedPath, onPick }: {
   );
 }
 
-export function Inspector({ runId, view, node, total, linkFor = (id) => href(runId, "graph", { node: id }) }: {
-  runId: string; view: GraphView; node: GraphNode | null; total: number; linkFor?: (id: string) => string;
+export function Inspector({ runId, view, node, total, linkFor = (id) => href(runId, "graph", { node: id }), patch }: {
+  runId: string; view: GraphView; node: GraphNode | null; total: number; linkFor?: (id: string) => string; patch?: PatchProps;
 }) {
   const rel = useMemo(() => {
     if (!node) return { from: [] as GraphNode[], to: [] as GraphNode[], rank: null as number | null };
@@ -134,10 +136,30 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
           </div>
         ))}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: "auto" }}>
-        <a href={href(runId, "tensors", { node: node.output_op })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>
-        <a href={href(runId, "trace", { node: node.id })} className="btn lbl" style={{ height: 38 }}>Trace</a>
+      {patch && <PatchPanel key={[node.id, patch.state?.op, patch.state?.baseline, patch.state?.source].join("|")} runId={runId} node={node} patch={patch} />}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: "auto" }}>
+        {node.shape.length >= 2 && <TraceFrom key={node.id} runId={runId} node={node} />}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+          <a href={href(runId, "tensors", { node: node.output_op })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>
+          <a href={href(runId, "trace", { node: node.id })} className="btn lbl" style={{ height: 38 }}>Trace</a>
+          <a href={href(runId, "trace", traceParams({ node: node.id, layer: "layer_ig", lop: node.output_op, go: true }))}
+            className="btn lbl" style={{ height: 38, gridColumn: "1 / -1" }}>Layer attribution</a>
+        </div>
       </div>
+    </div>
+  );
+}
+
+/** Channel picker linking to a unit objective in the Trace view; render with key={node.id} so the channel resets. */
+function TraceFrom({ runId, node }: { runId: string; node: GraphNode }) {
+  const [channel, setChannel] = useState(0);
+  const n = node.shape[1];
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <span className="lbl dim" style={{ flexGrow: 1 }}>Trace from</span>
+      <input className="field" type="number" aria-label="Channel" min={0} max={n - 1} value={channel} style={{ width: 80 }}
+        onChange={(e) => { const c = Number(e.target.value); if (Number.isInteger(c) && c >= 0 && c < n) setChannel(c); }} />
+      <a href={href(runId, "trace", traceParams({ node: node.id, obj: { op: node.output_op, channel }, go: true }))} className="btn lbl">Trace ch →</a>
     </div>
   );
 }

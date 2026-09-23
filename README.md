@@ -81,7 +81,10 @@ neurotome serve     # UI and API together on http://127.0.0.1:7070
   inside a collapsed module opens its ancestors, selects it and centres it.
 - **Keyboard** (click or Tab into the canvas): ↓ child, ↑ parent, ←/→ siblings, `Enter` opens the
   tensor, `Escape` clears the search, `+`/`-` expand/collapse the selection.
-- **Colour**: Plain · Attr (grad × act) · Norm (RMS) · Sparsity (zero %) · NaN/Inf flag, with a legend.
+- **Colour**: Plain · Attr (grad × act) · Norm (RMS) · Sparsity (zero %) · NaN/Inf flag · Patch Δ, with a legend.
+- **Patch** (inspector): replace the node's output with zeros, its spatial mean, or the same node of another run
+  of this model, and re-run the forward pass. The panel shows Δlogit / Δprob of the top class; `Patch Δ` colours
+  every node by ‖after − before‖ / ‖before‖. `Trace ch →` and `Layer attribution` jump to the Trace view.
 - **Hover** an edge for the shape it carries and any dtype/device change; the minimap (bottom left)
   pans on click or drag.
 
@@ -98,18 +101,33 @@ neurotome serve     # UI and API together on http://127.0.0.1:7070
 - **Compare**: two nodes side by side (default: the node's parent, e.g. pre vs post ReLU) on a shared scale
   when shapes match, plus Δ statistics, a Δ histogram, cosine similarity and max |Δ|.
 - **Export**: every chart has a `PNG` button.
+- **Trace from c<n>**: attribute the selected channel (Σ over positions) instead of a logit.
+
+## Trace
+
+- **Objective**: a logit (default: the top prediction) or an internal unit, i.e. one channel of a module output
+  summed over positions (`obj=<op>&ch=<c>` in the URL; `← Logits` goes back). Input map, node scores, merge shares
+  and the dominant path are all computed for that objective.
+- **Merge shares**: at `add` / `cat` / other merges an edge's share is that parent's grad × input *through the
+  merge*, so the dominant path follows real flow.
+- **Layer attribution**: Layer IG or Layer conductance per channel of the selected node; pick a channel for its
+  neuron conductance map over the input.
+- **Method agreement**: `Compare methods` scores every pair of input methods (and per-channel methods for the
+  selected node) by top-k Jaccard / overlap and Spearman rank correlation.
+- Long work (IG, layer methods, agreement, patching) runs as a background job with a progress bar and `Cancel`;
+  results are cached in the run folder, so a repeat is instant.
 
 ## Layout
 
 ```
 backend/            Python package `neurotome` (FastAPI, TorchLens, Captum)
-  neurotome/        capture.py · graph.py · tensors.py · slicing.py · attribution.py · runs.py · api.py · cli.py
+  neurotome/        capture.py · graph.py · tensors.py · slicing.py · attribution.py · jobs.py · runs.py · api.py · cli.py
   tests/            end-to-end tests (tiny model + ResNet-18)
 frontend/           Vite + React + TypeScript UI
   src/views/        Home · Graph · Tensors · Trace
   src/components/   GraphCanvas (ELK worker, canvas edges), Minimap, GraphSearch, charts, panels,
-                    InputOverlay, ValuesTable, ComparePanel
-  src/lib/          pure logic: layout, viewport, graphState, tensorState, exportPng (tested with vitest)
+                    InputOverlay, ValuesTable, ComparePanel, PatchPanel, JobProgress, AgreementMatrix
+  src/lib/          pure logic: layout, viewport, graphState, tensorState, traceState, jobs, exportPng (tested with vitest)
 design/             tokens.json + the canvas mockups that set the visual direction
 docs/               PLAN.md (MVP + roadmap + steps) · ARCHITECTURE.md · DESIGN.md · screenshots
 examples/           quickstart.py · custom_model.py

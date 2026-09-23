@@ -1,5 +1,6 @@
 import type {
-  Attribution, DiffResult, Fold, GraphView, IndexEntry, Method, ModuleEntry, RunMeta, SliceResult, TensorOpts, TensorView,
+  Attribution, DiffResult, Fold, GraphView, IndexEntry, Job, JobRequest, Method, ModuleEntry, Objective, RunMeta, SliceResult,
+  TensorOpts, TensorView,
 } from "./types";
 
 async function ok(res: Response): Promise<Response> {
@@ -38,12 +39,13 @@ export const api = {
     return req<{ upload_id: string; name: string }>("/api/uploads", { method: "POST", body: fd });
   },
   modules: (id: string) => req<ModuleEntry[]>(`/api/runs/${enc(id)}/modules`),
-  graph: (id: string, depth: number, attr?: { method: Method; target?: number | null; steps?: number }, fold?: Fold) => {
+  graph: (id: string, depth: number, attr?: { method: Method; target?: number | null; steps?: number; objective?: Objective | null }, fold?: Fold) => {
     const q = new URLSearchParams({ depth: String(depth) });
     if (attr) {
       q.set("method", attr.method);
       if (attr.target != null) q.set("target", String(attr.target));
       if (attr.steps) q.set("steps", String(attr.steps));
+      if (attr.objective) { q.set("obj_op", attr.objective.op); q.set("obj_ch", String(attr.objective.channel)); }
     }
     if (fold?.expand.length) q.set("expand", fold.expand.join(","));
     if (fold?.collapse.length) q.set("collapse", fold.collapse.join(","));
@@ -65,6 +67,10 @@ export const api = {
   sliceNpy: async (id: string, op: string, s: string) =>
     (await ok(await fetch(`/api/runs/${enc(id)}/ops/${enc(op)}/slice.npy?${new URLSearchParams({ s })}`))).blob(),
   diff: (id: string, a: string, b: string) => req<DiffResult>(`/api/runs/${enc(id)}/diff?${new URLSearchParams({ a, b })}`),
-  attribution: (id: string, body: { method: Method; target: number | null; steps: number }) =>
+  attribution: (id: string, body: { method: Method; target: number | null; steps: number; objective?: Objective | null }) =>
     req<Attribution>(`/api/runs/${enc(id)}/attribution`, json(body)),
+  startJob: (runId: string, body: JobRequest) => req<Job>(`/api/runs/${enc(runId)}/jobs`, json(body)),
+  job: (jobId: string) => req<Job>(`/api/jobs/${enc(jobId)}`),
+  cancelJob: (jobId: string) => req<Job>(`/api/jobs/${enc(jobId)}/cancel`, { method: "POST" }),
+  jobEventsUrl: (jobId: string) => `/api/jobs/${enc(jobId)}/events`,
 };

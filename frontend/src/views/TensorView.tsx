@@ -9,6 +9,7 @@ import { api } from "../lib/api";
 import { exportTiles, fileName } from "../lib/exportPng";
 import { num, shape } from "../lib/format";
 import { href, navigate, type Route } from "../lib/router";
+import { channelIsAxis1, traceParams } from "../lib/traceState";
 import {
   cellOf, cellPixel, cellSpan, defaultSlice, parentNode, parseTensorParams, tensorParams, unscale, type TensorState,
 } from "../lib/tensorState";
@@ -92,6 +93,11 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
                 <input className="field" type="number" min={0} max={t.channels - 1} value={s.c ?? t.channel}
                   onChange={(e) => { const c = toInt(e.target.value); if (c != null) go({ c }); }} />
               </label>
+              {node && channelIsAxis1(t.shape) && (
+                <a className="btn lbl" href={href(run.id, "trace", traceParams({ obj: { op: node.output_op, channel: t.channel }, node: node.id, go: true }))}>
+                  Trace from c{t.channel}
+                </a>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                   <span className="lbl dim">Position (y, x)</span>

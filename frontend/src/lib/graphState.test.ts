@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { dtypeShort } from "./format";
-import { callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, revealFold, searchIndex, toggleFold, withinGroup } from "./graphState";
-import type { GraphNode, GraphView, IndexEntry, Stats } from "./types";
+import {
+  callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, parsePatch, patchParams, revealFold, searchIndex, toggleFold, withinGroup,
+  type PatchState,
+} from "./graphState";
+import type { GraphNode, GraphView, IndexEntry, PatchResult, Stats } from "./types";
 
 const st = (o: Partial<Stats>): Stats =>
   ({ mean: 0, std: 0, min: 0, max: 0, zero_frac: 0, hist: [], hist_range: [0, 0], numel: 10, ...o });
@@ -95,6 +98,7 @@ describe("colour modes", () => {
     expect(colorMode(new URLSearchParams("color=norm"))).toBe("norm");
     expect(colorMode(new URLSearchParams("overlay=attr"))).toBe("attr");
     expect(colorMode(new URLSearchParams("color=bogus"))).toBe("plain");
+    expect(colorMode(new URLSearchParams("color=patch"))).toBe("patch");
   });
   it("plain has no tones or legend", () => {
     expect(nodeTones(view([node("a")]), "plain")).toEqual({ legend: null });
@@ -137,5 +141,51 @@ describe("colour modes", () => {
   it("strips the torch prefix from dtypes", () => {
     expect(dtypeShort("torch.float32")).toBe("float32");
     expect(dtypeShort(null)).toBe("—");
+  });
+});
+
+describe("patching", () => {
+  const q = (p: Record<string, string | null>) => {
+    const u = new URLSearchParams();
+    for (const [k, v] of Object.entries(p)) if (v) u.set(k, v);
+    return new URLSearchParams(u.toString());
+  };
+  it("round-trips patch state, zeros and unused psrc omitted", () => {
+    const states: PatchState[] = [
+      { op: "relu_2_4", baseline: "zeros", source: null },
+      { op: "relu_2_4", baseline: "mean", source: null },
+      { op: "conv2d_1_1", baseline: "run", source: "run_b" },
+    ];
+    for (const s of states) expect(parsePatch(q(patchParams(s)))).toEqual(s);
+    expect(patchParams(states[0])).toEqual({ patch: "relu_2_4", pb: null, psrc: null });
+    expect(patchParams({ op: "a", baseline: "mean", source: "x" }).psrc).toBeNull();
+    expect(patchParams(null)).toEqual({ patch: null, pb: null, psrc: null });
+  });
+  it("parses defaults and rejects run without a source", () => {
+    expect(parsePatch(q({ patch: "a", pb: "bogus", psrc: "x" }))).toEqual({ op: "a", baseline: "zeros", source: null });
+    expect(parsePatch(q({ patch: "a", pb: "run" }))).toBeNull();
+    expect(parsePatch(q({ pb: "mean" }))).toBeNull();
+  });
+  const result = (o: Partial<PatchResult> = {}): PatchResult => ({
+    op: "b", path: "layer1.conv", baseline: "zeros", source_run: null, method_label: "Activation patching · TorchLens replay",
+    target: 3, target_label: "cat", before: { logit: 2, prob: 0.8 }, after: { logit: 1, prob: 0.4 },
+    delta_logit: -1, delta_prob: -0.4, top_after: [],
+    deltas: { a: 0, b: 5, c: 2, d: 1 }, rel: { a: 0, b: 1, c: 0.5, d: 0.25 }, ...o,
+  });
+  it("normalises by the max rel outside the patched node", () => {
+    const v = view([node("a"), node("m:b", { kind: "module", output_op: "b" }), node("c"), node("d"), node("e")]);
+    const { tones, legend } = nodeTones(v, "patch", result());
+    expect(tones!.get("m:b")).toEqual({ v: 1, readout: "patched · zeros" });
+    expect(tones!.get("c")).toEqual({ v: 1, readout: "‖Δ‖ 2.00 · rel 50%" });
+    expect(tones!.get("d")!.v).toBeCloseTo(0.5);
+    expect(tones!.get("a")!.v).toBe(0);
+    expect(tones!.get("e")).toEqual({ v: null, readout: "‖Δ‖ —" });
+    expect(legend).toEqual({ title: "Patch Δ = ‖after − before‖ / ‖before‖ · layer1.conv → zeros", lo: "0", hi: "50%" });
+  });
+  it("no downstream change gives v 0, a missing result gives no legend", () => {
+    const { tones } = nodeTones(view([node("a"), node("b")]), "patch", result({ rel: { a: 0, b: 1 } }));
+    expect(tones!.get("a")!.v).toBe(0);
+    expect(nodeTones(view([node("a")]), "patch", null)).toEqual({ legend: null });
+    expect(nodeTones(view([node("a")]), "patch")).toEqual({ legend: null });
   });
 });

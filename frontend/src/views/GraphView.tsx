@@ -1,12 +1,15 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { GraphSearch } from "../components/GraphSearch";
 import { Inspector, ModuleTree } from "../components/panels";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
-import { callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, revealFold, toggleFold, withinGroup } from "../lib/graphState";
+import {
+  callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, parsePatch, patchParams, revealFold, toggleFold, withinGroup,
+} from "../lib/graphState";
+import { useJob } from "../lib/jobs";
 import { href, navigate, type Route } from "../lib/router";
-import type { ColorMode, GraphView as GV, IndexEntry, RunMeta } from "../lib/types";
+import type { ColorMode, GraphView as GV, IndexEntry, PatchResult, RunMeta } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
 
 export function pickNodeForModule(view: GV, address: string): string | null {
@@ -26,7 +29,7 @@ export function pickNodeForModule(view: GV, address: string): string | null {
 
 const COLOURS: { id: ColorMode; label: string }[] = [
   { id: "plain", label: "Plain" }, { id: "attr", label: "Attr" }, { id: "norm", label: "Norm" },
-  { id: "sparsity", label: "Sparsity" }, { id: "nan", label: "NaN/Inf" },
+  { id: "sparsity", label: "Sparsity" }, { id: "nan", label: "NaN/Inf" }, { id: "patch", label: "Patch Δ" },
 ];
 
 export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
@@ -41,6 +44,16 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const view = graph.data;
   const [query, setQuery] = useState("");
   const [centre, setCentre] = useState(0);
+  const [nonce, setNonce] = useState(0);   // re-runs an unchanged patch (after a cancel or an error)
+  const ps = parsePatch(route.params);
+  const pj = useJob<PatchResult>();
+  useEffect(() => {
+    if (ps) void pj.run(run.id, { kind: "patch", op: ps.op, baseline: ps.baseline, source_run: ps.source, target: null });
+    else pj.cancel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.id, ps?.op, ps?.baseline, ps?.source, nonce]);
+  const pr = pj.job?.result;
+  const patchResult = ps && pr && pr.op === ps.op && pr.baseline === ps.baseline && pr.source_run === ps.source ? pr : null;
 
   const selectedId = route.params.get("node");
   const selected = useMemo(() => {
@@ -53,10 +66,10 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
   }, [view, selectedId]);
   // focus (and search centring) waits until the requested node is really in the view, not a fallback
   const exact = !!selected && (!selectedId || selected.id === selectedId || selected.output_op === selectedId);
-  const { tones, legend } = useMemo(() => (view ? nodeTones(view, color) : { tones: undefined, legend: null }), [view, color]);
+  const { tones, legend } = useMemo(() => (view ? nodeTones(view, color, patchResult) : { tones: undefined, legend: null }), [view, color, patchResult]);
 
   const state = (params: Record<string, string | null>) =>
-    ({ node: selected?.id ?? null, depth: String(depth), ...fp, color: color === "plain" ? null : color, ...params });
+    ({ node: selected?.id ?? null, depth: String(depth), ...fp, color: color === "plain" ? null : color, ...patchParams(ps), ...params });
   const go = (params: Record<string, string | null>) => navigate(href(run.id, "graph", state(params)), true);
 
   const onToggle = (call: string, open: boolean) => {
@@ -96,7 +109,8 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
         <span className="lbl dim">Colour</span>
         <div className="seg lbl" role="group" aria-label="Node colour">
           {COLOURS.map((c) => (
-            <button key={c.id} type="button" aria-pressed={c.id === color} onClick={() => go({ color: c.id === "plain" ? null : c.id })}>{c.label}</button>
+            <button key={c.id} type="button" aria-pressed={c.id === color} onClick={() => go({ color: c.id === "plain" ? null : c.id })}
+              disabled={c.id === "patch" && !ps} title={c.id === "patch" && !ps ? "Run a patch from the inspector first" : undefined}>{c.label}</button>
           ))}
         </div>
       </TopBar>
@@ -140,7 +154,12 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
         </section>
         <aside className="panel" style={{ width: 360, flexShrink: 0, borderLeft: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {view && <Inspector runId={run.id} view={view} node={selected} total={view.nodes.length}
-            linkFor={(id) => href(run.id, "graph", state({ node: id }))} />}
+            linkFor={(id) => href(run.id, "graph", state({ node: id }))}
+            patch={{
+              spec: run.model.spec, weights: run.model.weights, state: ps, job: pj.job, error: pj.error, result: patchResult, onCancel: pj.cancel,
+              onApply: (p) => { go({ ...patchParams(p), color: "patch" }); setNonce((n) => n + 1); },
+              onClear: () => go({ ...patchParams(null), ...(color === "patch" && { color: null }) }),
+            }} />}
         </aside>
       </div>
     </>

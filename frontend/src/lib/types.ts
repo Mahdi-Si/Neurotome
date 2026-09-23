@@ -56,7 +56,7 @@ export interface GraphNode {
 export interface GraphEdge {
   source: string; target: string; shape: number[];
   dtype?: string | null; device?: string | null; target_dtype?: string | null; target_device?: string | null;
-  share?: number; on_path?: boolean;
+  share?: number; on_path?: boolean; share_method?: "merge" | "parent";
 }
 
 export interface IndexEntry {
@@ -66,7 +66,7 @@ export interface IndexEntry {
 /** Per-module fold overrides, as module calls, e.g. "layer1.0:1". */
 export interface Fold { expand: string[]; collapse: string[] }
 
-export type ColorMode = "plain" | "attr" | "norm" | "sparsity" | "nan";
+export type ColorMode = "plain" | "attr" | "norm" | "sparsity" | "nan" | "patch";
 
 /** Per-node colour-mode value, computed by the view and drawn by GraphCanvas. */
 export interface NodeTone { v: number | null; flag?: boolean; readout: string } // v in [0,1] → tint + bar; flag → negative outline + badge
@@ -158,16 +158,58 @@ export type TensorView = ImageTensorView | SequenceTensorView | VectorTensorView
 
 export type Method = "gxa" | "saliency" | "ig";
 
+export type LayerMethod = "layer_ig" | "layer_cond";
+export type Baseline = "zeros" | "mean" | "run";
+/** An internal unit as the attribution objective: Σ over positions of channel `channel` (axis 1) of op `op`. */
+export interface Objective { op: string; channel: number }
+export type ObjectiveInfo = { kind: "logit"; index: number } | { kind: "unit"; op: string; channel: number };
+
 export interface Attribution {
-  method: Method;
-  method_label: string;
-  node_method: string;
-  target: number;
-  target_label: string | null;
-  prob: number;
-  logit: number;
+  method: Method; method_label: string; node_method: string; merge_method: string;
+  objective: ObjectiveInfo; objective_label: string;
+  target: number | null; target_label: string | null;
+  prob: number | null; logit: number | null; value: number;
   steps: number | null;
   input: { map: number[][]; total: number; convergence_delta: number | null } | null;
   scores: Record<string, number>;
   top_units: { op: string; path?: string; channel: number; value: number }[];
 }
+
+export interface LayerResult {
+  method: LayerMethod; method_label: string; op: string; path: string; objective_label: string; steps: number;
+  channels: number[]; top: { channel: number; value: number }[]; total: number; convergence_delta: number | null;
+}
+
+export interface NeuronResult {
+  method: "neuron_cond"; method_label: string; op: string; path: string; channel: number; objective_label: string; steps: number;
+  input: { map: number[][]; total: number; convergence_delta: null };
+}
+
+export interface AgreementBlock {
+  basis: string; methods: string[]; labels: string[]; n: number; k: number; op?: string;
+  jaccard: number[][]; overlap: number[][]; spearman: (number | null)[][];
+}
+export interface AgreementResult {
+  objective_label: string; steps: number; input: AgreementBlock | null; units: AgreementBlock | null; units_error: string | null;
+}
+
+export interface PatchResult {
+  op: string; path: string; baseline: Baseline; source_run: string | null; method_label: string;
+  target: number; target_label: string | null;
+  before: { logit: number; prob: number }; after: { logit: number; prob: number };
+  delta_logit: number; delta_prob: number; top_after: TopK[];
+  deltas: Record<string, number>; rel: Record<string, number>;   // keyed by op id (node.output_op)
+}
+
+export type JobKind = "attribution" | "layer" | "neuron" | "agreement" | "patch";
+export type JobStatus = "queued" | "running" | "done" | "error" | "cancelled";
+export interface Job<R = unknown> {
+  id: string; kind: JobKind; run_id: string | null; status: JobStatus;
+  progress: number; message: string; result: R | null; error: string | null; created: number;
+}
+export type JobRequest =
+  | { kind: "attribution"; method: Method; target: number | null; objective: Objective | null; steps: number }
+  | { kind: "layer"; method: LayerMethod; op: string; target: number | null; objective: Objective | null; steps: number }
+  | { kind: "neuron"; op: string; channel: number; target: number | null; objective: Objective | null; steps: number }
+  | { kind: "agreement"; op: string | null; target: number | null; objective: Objective | null; steps: number }
+  | { kind: "patch"; op: string; baseline: Baseline; source_run: string | null; target: number | null };

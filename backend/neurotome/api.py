@@ -7,13 +7,14 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from .attribution import METHODS
 from .config import get_settings
 from .graph import graph_view, module_tree, search_index
+from .jobs import TERMINAL, Job
 from .models import SUGGESTED_MODELS
 from .runs import RunManager
 from .slicing import SliceError, SliceTooLarge, slice_npy, slice_table
@@ -21,6 +22,7 @@ from .store import PREVIEW, RunStore, safe_name
 from .tensors import tensor_diff, tensor_view
 
 STATIC_DIR = Path(__file__).parent / "static"
+_JSON = TypeAdapter(Any)
 
 
 class Sample(BaseModel):
@@ -37,10 +39,28 @@ class CreateRun(BaseModel):
     sample: Sample = Sample()
 
 
+class Objective(BaseModel):
+    op: str
+    channel: int = Field(ge=0)
+
+
 class AttributionRequest(BaseModel):
     method: str = "ig"
     target: int | None = None
     steps: int = Field(32, ge=1, le=512)
+    objective: Objective | None = None
+
+
+class JobRequest(BaseModel):
+    kind: Literal["attribution", "layer", "neuron", "agreement", "patch"]
+    method: str | None = None  # attribution: gxa|saliency|ig (default ig); layer: layer_ig|layer_cond
+    target: int | None = None
+    objective: Objective | None = None
+    steps: int = Field(32, ge=1, le=512)
+    op: str | None = None  # layer / neuron / patch; agreement: optional (units block)
+    channel: int | None = Field(None, ge=0)  # neuron
+    baseline: Literal["zeros", "mean", "run"] = "zeros"  # patch
+    source_run: str | None = None  # patch, baseline == "run"
 
 
 def create_app(manager: RunManager | None = None) -> FastAPI:
@@ -68,6 +88,20 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
     def _ir(run_id: str) -> dict[str, Any]:
         _meta(run_id)
         return store.ir(run_id)
+
+    def _job(job_id: str) -> Job:
+        try:
+            return manager.jobs.get(job_id)
+        except KeyError:
+            raise HTTPException(404, f"Job {job_id} not found") from None
+
+    def _attribution(run_id: str, method: str, target: int | None, steps: int, objective: dict | None):
+        try:
+            return manager.attribution(run_id, method, target, steps, objective)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
 
     def _tensor(run_id: str, op_id: str):
         _meta(run_id)
@@ -134,13 +168,16 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         steps: int = 32,
         expand: str = "",
         collapse: str = "",
+        obj_op: str | None = None,
+        obj_ch: int | None = Query(None, ge=0),
     ) -> dict[str, Any]:
         ir = _ir(run_id)
-        scores = None
-        if method:
-            scores = manager.attribution(run_id, method, target, steps)["scores"]
+        if (obj_op is None) != (obj_ch is None):
+            raise HTTPException(400, "obj_op and obj_ch go together")
+        objective = {"op": obj_op, "channel": obj_ch} if obj_op is not None else None
+        res = _attribution(run_id, method, target, steps, objective) if method else {}
         calls = [[c for c in s.split(",") if c] for s in (expand, collapse)]
-        return graph_view(ir, depth, scores, *calls)
+        return graph_view(ir, depth, res.get("scores"), *calls, merges=res.get("merges"), start=obj_op)
 
     @app.get("/api/runs/{run_id}/index")
     def index(run_id: str) -> list[dict[str, Any]]:
@@ -207,10 +244,48 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         _meta(run_id)
         if req.method not in METHODS:
             raise HTTPException(400, f"method must be one of {sorted(METHODS)}")
+        objective = req.objective.model_dump() if req.objective else None
+        return _attribution(run_id, req.method, req.target, req.steps, objective)
+
+    @app.post("/api/runs/{run_id}/jobs")
+    def start_job(run_id: str, req: JobRequest) -> dict[str, Any]:
+        _meta(run_id)
         try:
-            return manager.attribution(run_id, req.method, req.target, req.steps)
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from e
+            return manager.job(run_id, req.model_dump()).to_json()
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: str) -> dict[str, Any]:
+        return _job(job_id).to_json()
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str) -> dict[str, Any]:
+        _job(job_id)
+        return manager.jobs.cancel(job_id).to_json()
+
+    @app.get("/api/jobs/{job_id}/events")
+    def job_events(job_id: str) -> StreamingResponse:
+        """Server-sent events: ``data: <job json>`` per change, ``: ping`` every 15 s; ends when terminal."""
+        _job(job_id)
+
+        def gen():
+            version = -1
+            while True:
+                try:
+                    job, new = manager.jobs.wait(job_id, version, 15.0)
+                except KeyError:  # dropped from the runner's history
+                    return
+                if new == version:
+                    yield ": ping\n\n"
+                    continue
+                version = new
+                yield f"data: {_JSON.dump_json(job).decode()}\n\n"  # NaN/Inf -> null, as in JSON replies
+                if job["status"] in TERMINAL:
+                    return
+
+        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
     if STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists():
         app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")

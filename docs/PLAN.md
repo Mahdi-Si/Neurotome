@@ -147,16 +147,17 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 
 ### M3 · Attribution and trace (≈2 weeks)
 
-- [ ] Per-node **layer** methods from Captum: LayerIntegratedGradients, LayerConductance, and NeuronConductance for a chosen channel
-- [ ] Proper merge attribution: split flow at `add`/`cat` by each parent's contribution to the merge output, not the parents' own totals
-- [ ] "Trace from here": attribute a chosen internal channel, not only an output logit
-- [ ] Method agreement panel: top-k overlap between methods
-- [ ] Async jobs with progress for IG and patching (see M4)
-- [ ] Activation patching v1: replace one node's output with a baseline and re-run (via TorchLens interventions)
+- [x] Per-node **layer** methods from Captum: LayerIntegratedGradients, LayerConductance, and NeuronConductance for a chosen channel
+- [x] Proper merge attribution: split flow at `add`/`cat` by each parent's contribution to the merge output, not the parents' own totals
+- [x] "Trace from here": attribute a chosen internal channel, not only an output logit
+- [x] Method agreement panel: top-k overlap between methods
+- [x] Async jobs with progress for IG and patching (see M4)
+- [x] Activation patching v1: replace one node's output with a baseline and re-run (via TorchLens interventions)
+- [x] M3 notes: neuron conductance is computed directly (Σ over positions; Captum's `NeuronConductance` refuses aggregated neurons) and matches Captum per neuron; random-init models are seeded on load so a spec reloads to the captured weights; patch deltas skip ops whose tensor a later in-place op (`+=`, `ReLU(inplace)`) overwrote during replay
 
 ### M4 · Hardening and release (≈1 week)
 
-- [ ] Background job queue (captures and attribution) with progress events over SSE
+- [ ] Background job queue for captures (the generic runner, SSE progress and cancel landed in M3 for attribution, layer, agreement and patch jobs: `jobs.py`)
 - [ ] Capture budget UI: show when `NEUROTOME_MAX_CAPTURE_MB` truncated a run; selective capture by module
 - [ ] Error states for unsupported ops, non-tensor outputs, integer inputs
 - [ ] Dark theme (token-driven; charts re-validated against the dark surface)

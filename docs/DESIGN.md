@@ -59,6 +59,18 @@ The accent and negative pair passes the palette validator: CVD ΔE 30, normal-vi
 - **Flag badge**: in NaN/Inf mode a flagged node gets a 1.5 px `negative` outline and a mono `NAN/INF` tag in
   `negative-text`. This is the only place `negative` appears on graph nodes.
 - **Canvas focus ring**: `.graph-canvas:focus-visible` draws a 1.5 px `accent` outline inset by 2 px (keyboard only).
+- **Patch Δ legend**: the colour-mode legend for activation patching reads
+  `Patch Δ = ‖after − before‖ / ‖before‖ · <path> → <baseline>`, lo `0`, hi the largest relative change (`pct`). Tints
+  are normalised by the largest change outside the patched node; the patched node itself is full `accent` with the
+  readout `patched · <baseline>`, other nodes read `‖Δ‖ <value> · rel <pct>`, and nodes without a value read `‖Δ‖ —`.
+- **Job progress**: a 4 px `line-soft` track with an `accent` fill at the job's progress (`.job-track`), and under it
+  a mono `.lbl dim` status line (`Queued`, `42% · IG batch 3/8`, `Cancelled`) with a `Cancel` text button
+  (`.chart-export` style) while the job runs. Nothing renders once the job is done; a failed job shows the server's
+  message in `.err`. Used wherever a computation runs as a job (trace parameter strip, layer panel, neuron map,
+  method agreement, patch panel).
+- **Objective pill**: with a unit objective the Trace view's Target select becomes a `.pill`
+  `Unit · <objective label>` (`relu_2_4 · ch 3 · Σ spatial` until the first result names the module path), followed
+  by a `← Logits` text button that goes back to a logit target.
 
 ## Charts
 
@@ -87,6 +99,12 @@ The accent and negative pair passes the palette validator: CVD ΔE 30, normal-vi
 - **PNG export**: every chart's readout line carries a `PNG` text button at its right end (`.chart-export`: no
   border, `ink-2`, `accent` on hover, the usual focus ring). The export is the chart at 2× (canvases upscaled
   nearest-neighbour to ≥ 480 px) on a `panel` ground; the file is named `run_op_cN_chart.png`.
+- **Agreement matrix**: an n×n SVG grid of 40 px cells with 1 px `line` rules; row and column heads are mono
+  uppercase short method names (`GXA`, `SAL`, `IG`, `LIG`, `LCOND`). A cell's fill is `accent` at alpha v for Jaccard
+  and positive Spearman, `negative` at alpha |v| for negative Spearman, and its value is printed in the cell (mono
+  10.5 px `ink`, 2 decimals, with a `panel` halo) so colour is never the only carrier; the diagonal is `line-soft`
+  with `—`. The caption above names the basis and `top-k = k of n`; the hover readout prints every metric
+  (`IG × SAL · Jaccard@58 0.41 · overlap 0.58 · Spearman 0.72`).
 - **Values table**: mono `.num` 11 px cells, right-aligned, `line-soft` row rules, headers `.lbl dim` sticky on
   `panel`; negative values and `nan`/`inf` in `negative-text`; at most 320 px high, scrolls both ways, with a
   `key · shape · axes` caption above and a dim truncation note when the slice was cut.
