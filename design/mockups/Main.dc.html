@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Graph workspace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#EDEDEA;font-family:'Geist',system-ui,sans-serif;color:#111111}
+a{color:#111111;text-decoration:none}a:hover{color:#3B4BDB}
+.m{font-family:'Geist Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.05em;font-size:10.5px;line-height:1.35}
+.dotgrid{background-color:#F4F4F1;background-image:radial-gradient(rgba(17,17,17,.16) 1px,transparent 1.3px);background-size:16px 16px}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; display: flex; flex-direction: column; background: #F4F4F1; overflow: hidden;">
+
+<header style="height: 52px; flex-shrink: 0; box-sizing: border-box; display: flex; align-items: center; gap: 18px; padding: 0 20px; border-bottom: 1px solid #D6D6D1;">
+<a href="Home.dc.html" style="display: flex; align-items: center; gap: 9px;">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#111111" stroke-width="1.2" aria-hidden="true"><circle cx="9" cy="9" r="7.4"></circle><circle cx="9" cy="9" r="2.4" fill="#111111"></circle><path d="M9 0v4M9 14v4M0 9h4M14 9h4"></path></svg>
+<span class="m" style="font-size: 12px; font-weight: 500; letter-spacing: .14em;">Dissect</span></a>
+<span style="width: 1px; height: 20px; background: #D6D6D1;"></span>
+<div style="font-family: 'Geist Mono', monospace; font-size: 12px; color: #5E5E59; display: flex; gap: 8px;"><span>resnet18</span><span>/</span><span>run_0007</span><span>/</span><span style="color: #111111;">img_0412.jpg</span></div>
+<nav style="align-self: stretch; display: flex; margin-left: 20px;" aria-label="Views">
+<a href="Main.dc.html" class="m" style="display: flex; align-items: center; padding: 0 14px; border-bottom: 1.5px solid #111111; margin-bottom: -1px;">Graph</a>
+<a href="Tensor.dc.html" class="m" style="display: flex; align-items: center; padding: 0 14px; color: #5E5E59;">Tensors</a>
+<a href="Trace.dc.html" class="m" style="display: flex; align-items: center; padding: 0 14px; color: #5E5E59;">Trace</a>
+</nav>
+<div style="flex-grow: 1;"></div>
+<span class="m" style="color: #5E5E59;">Fwd · 71 ops · 46.2 MB</span>
+<span class="m" style="border: 1px solid #111111; border-radius: 10px; padding: 2px 8px;">IG · 32 steps</span>
+<button type="button" class="m" style="height: 30px; padding: 0 14px; background: #111111; color: #FAFAF8; border: 0; border-radius: 2px; cursor: pointer;">Re-run</button>
+</header>
+
+<div style="flex-grow: 1; min-height: 0; display: flex;">
+
+<aside style="width: 248px; flex-shrink: 0; box-sizing: border-box; border-right: 1px solid #D6D6D1; display: flex; flex-direction: column;">
+<div style="padding: 14px 16px 10px; display: flex; flex-direction: column; gap: 10px;">
+<div style="display: flex; justify-content: space-between;"><span class="m">Modules</span><span class="m" style="color: #5E5E59;">62</span></div>
+<label style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 1px solid #D6D6D1; background: #FAFAF8;">
+<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#5E5E59" stroke-width="1.1" aria-hidden="true"><circle cx="5" cy="5" r="3.6"></circle><path d="M7.7 7.7 11 11"></path></svg>
+<input type="text" placeholder="Filter modules, ops" aria-label="Filter modules and ops" style="border: 0; outline: 0; background: transparent; font-family: 'Geist Mono', monospace; font-size: 12px; width: 100%; color: #111111;">
+</label>
+</div>
+<div style="flex-grow: 1; display: flex; flex-direction: column; font-family: 'Geist Mono', monospace; font-size: 12px; padding: 0 8px;">
+<sc-for list="{{tree}}" as="t" hint-placeholder-count="18">
+<div style="{{t.style}}"><span style="{{t.pad}}"></span><span style="flex-grow: 1;">{{t.name}}</span><span class="m" style="color: #5E5E59; font-size: 9.5px;">{{t.type}}</span></div>
+</sc-for>
+</div>
+<div style="padding: 12px 16px; border-top: 1px solid #D6D6D1; display: flex; flex-direction: column; gap: 8px;">
+<span class="m" style="color: #5E5E59;">Nesting depth</span>
+<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #111111;">
+<button type="button" class="m" style="height: 28px; background: transparent; border: 0; border-right: 1px solid #111111; cursor: pointer; color: #111111;">1</button>
+<button type="button" class="m" style="height: 28px; background: #111111; color: #FAFAF8; border: 0; border-right: 1px solid #111111; cursor: pointer;">2</button>
+<button type="button" class="m" style="height: 28px; background: transparent; border: 0; border-right: 1px solid #111111; cursor: pointer; color: #111111;">3</button>
+<button type="button" class="m" style="height: 28px; background: transparent; border: 0; cursor: pointer; color: #111111;">All</button>
+</div>
+</div>
+</aside>
+
+<section class="dotgrid" style="flex-grow: 1; position: relative; overflow: hidden;" aria-label="Computation graph">
+<div style="position: absolute; left: 20px; top: 16px; display: flex; flex-direction: column; gap: 3px;">
+<span class="m">Forward trace</span>
+<span class="m" style="color: #5E5E59;">img_0412.jpg · 71 ops · depth 2</span>
+</div>
+<div style="position: absolute; right: 20px; top: 16px; width: 168px; display: flex; flex-direction: column; gap: 6px; padding: 10px; background: #FAFAF8; border: 1px solid #D6D6D1;">
+<span class="m">Node bar = |IG| share</span>
+<div style="height: 4px; background: linear-gradient(90deg, #E6E8FB, #3B4BDB);"></div>
+<div class="m" style="display: flex; justify-content: space-between; color: #5E5E59;"><span>0</span><span>.5</span><span>1</span></div>
+<div style="display: flex; align-items: center; gap: 8px; margin-top: 2px;"><span style="width: 16px; height: 10px; border: 1px solid #111111; box-shadow: 3px 3px 0 -1px #FAFAF8, 3px 3px 0 0 #111111;"></span><span class="m" style="color: #5E5E59;">Collapsed module</span></div>
+</div>
+
+<svg width="832" height="848" viewBox="0 0 832 848" fill="none" style="position: absolute; left: 0; top: 0;" aria-hidden="true">
+<defs><marker id="ah" viewBox="0 0 6 6" refX="5" refY="3" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0.5 5 3 0 5.5" stroke="#111111" stroke-width="1" fill="none"></path></marker></defs>
+<rect x="262" y="148" width="420" height="468" stroke="#111111" stroke-width="1" stroke-dasharray="3 3" fill="rgba(250,250,248,.55)"></rect>
+<g stroke="#111111" stroke-width="1" marker-end="url(#ah)">
+<path d="M400 64V83"></path><path d="M400 128V171"></path><path d="M400 216V235"></path><path d="M400 280V299"></path><path d="M400 344V363"></path><path d="M400 408V427"></path><path d="M400 472V493"></path><path d="M400 538V557"></path><path d="M400 602V635"></path><path d="M400 680V699"></path><path d="M400 744V763"></path>
+<path d="M400 140H610V516H501"></path>
+</g>
+<circle cx="400" cy="140" r="2.5" fill="#111111"></circle>
+<text x="408" y="78" font-family="Geist Mono, monospace" font-size="9.5" fill="#5E5E59">1×3×224×224</text>
+<text x="616" y="330" font-family="Geist Mono, monospace" font-size="9.5" fill="#5E5E59">identity</text>
+<text x="616" y="343" font-family="Geist Mono, monospace" font-size="9.5" fill="#5E5E59">64×56×56</text>
+<text x="408" y="630" font-family="Geist Mono, monospace" font-size="9.5" fill="#5E5E59">1×64×56×56</text>
+</svg>
+<div class="m" style="position: absolute; left: 272px; top: 154px;">layer1.0 · BasicBlock</div>
+<div class="m" style="position: absolute; left: 544px; top: 154px; width: 128px; text-align: right; color: #5E5E59;">7 ops · 73.9K</div>
+
+<sc-for list="{{nodes}}" as="n" hint-placeholder-count="12">
+<button type="button" onClick="{{n.pick}}" style="{{n.style}}">
+<span style="display: flex; justify-content: space-between; width: 100%;"><span class="m" style="color: #5E5E59; font-size: 9.5px;">{{n.op}}</span><span style="font-family: 'Geist Mono', monospace; font-size: 9.5px; color: #5E5E59;">{{n.outShort}}</span></span>
+<span style="font-size: 13px; font-weight: 500;">{{n.name}}</span>
+<span style="{{n.bar}}"></span>
+</button>
+</sc-for>
+
+<div style="position: absolute; left: 20px; bottom: 16px; width: 120px; height: 96px; background: #FAFAF8; border: 1px solid #D6D6D1; box-sizing: border-box;" aria-hidden="true">
+<svg width="118" height="94" viewBox="0 0 118 94" fill="none"><path d="M59 6V88" stroke="#C4C4BE"></path><rect x="44" y="16" width="30" height="50" stroke="#111111" stroke-dasharray="2 2"></rect><rect x="34" y="10" width="50" height="62" stroke="#3B4BDB"></rect><g fill="#111111"><rect x="52" y="4" width="14" height="4"></rect><rect x="52" y="20" width="14" height="4"></rect><rect x="52" y="30" width="14" height="4"></rect><rect x="52" y="40" width="14" height="4"></rect><rect x="52" y="50" width="14" height="4"></rect><rect x="52" y="70" width="14" height="4"></rect><rect x="52" y="80" width="14" height="4"></rect></g></svg>
+</div>
+<div style="position: absolute; right: 20px; bottom: 16px; display: flex; border: 1px solid #111111; background: #FAFAF8;">
+<button type="button" aria-label="Zoom out" style="width: 32px; height: 30px; background: transparent; border: 0; border-right: 1px solid #111111; cursor: pointer; font-family: 'Geist Mono', monospace; color: #111111;">−</button>
+<span class="m" style="width: 52px; display: flex; align-items: center; justify-content: center; border-right: 1px solid #111111;">100%</span>
+<button type="button" aria-label="Zoom in" style="width: 32px; height: 30px; background: transparent; border: 0; border-right: 1px solid #111111; cursor: pointer; font-family: 'Geist Mono', monospace; color: #111111;">+</button>
+<button type="button" class="m" style="height: 30px; padding: 0 12px; background: transparent; border: 0; cursor: pointer; color: #111111;">Fit</button>
+</div>
+</section>
+
+<aside style="width: 360px; flex-shrink: 0; box-sizing: border-box; border-left: 1px solid #D6D6D1; background: #FAFAF8; padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; overflow: hidden;" aria-label="Inspector">
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="#111111" stroke-width="1" aria-hidden="true"><circle cx="5.5" cy="5.5" r="3"></circle><path d="M5.5 0v11M0 5.5h11"></path></svg>
+<span class="m" style="color: #5E5E59;">Node {{sel.idx}} / 71</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px;">
+<span style="font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 500; letter-spacing: -0.02em;">{{sel.path}}</span>
+<div style="display: flex; gap: 6px;"><span class="m" style="border: 1px solid #111111; border-radius: 10px; padding: 1px 8px;">{{sel.op}}</span><span class="m" style="border: 1px solid #D6D6D1; border-radius: 10px; padding: 1px 8px; color: #5E5E59;">float32</span></div>
+</div>
+<div style="display: flex; flex-direction: column; border-top: 1px solid #111111;">
+<sc-for list="{{sel.rows}}" as="r" hint-placeholder-count="6">
+<div style="display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #E3E3DE;"><span class="m" style="color: #5E5E59;">{{r.k}}</span><span style="font-family: 'Geist Mono', monospace; font-size: 12px;">{{r.v}}</span></div>
+</sc-for>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<div style="display: flex; justify-content: space-between;"><span class="m">Activation</span><span class="m" style="color: #5E5E59;">{{sel.outShort}}</span></div>
+<div style="display: flex; align-items: flex-end; gap: 2px; height: 64px; border-bottom: 1px solid #111111;">
+<sc-for list="{{sel.hist}}" as="b" hint-placeholder-count="32"><div style="{{b.style}}"></div></sc-for>
+</div>
+<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px;">
+<sc-for list="{{sel.stats}}" as="s" hint-placeholder-count="4"><div style="display: flex; flex-direction: column; gap: 2px;"><span class="m" style="color: #5E5E59;">{{s.k}}</span><span style="font-family: 'Geist Mono', monospace; font-size: 12px;">{{s.v}}</span></div></sc-for>
+</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<div style="display: flex; justify-content: space-between;"><span class="m">Attribution → logit[207]</span><span class="m" style="color: #3B4BDB;">#{{sel.rank}}</span></div>
+<div style="display: flex; align-items: center; gap: 10px;"><div style="flex-grow: 1; height: 4px; background: #E3E3DE; display: flex;"><div style="{{sel.attrBar}}"></div></div><span style="font-family: 'Geist Mono', monospace; font-size: 12px;">{{sel.attr}}</span></div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">
+<div style="display: flex; flex-direction: column; gap: 4px;"><span class="m" style="color: #5E5E59;">From</span><span style="font-family: 'Geist Mono', monospace; font-size: 12px; white-space: pre-line;">{{sel.from}}</span></div>
+<div style="display: flex; flex-direction: column; gap: 4px;"><span class="m" style="color: #5E5E59;">Feeds</span><span style="font-family: 'Geist Mono', monospace; font-size: 12px; white-space: pre-line;">{{sel.to}}</span></div>
+</div>
+<div style="flex-grow: 1;"></div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
+<a href="Tensor.dc.html" class="m" style="height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px; background: #111111; color: #FAFAF8;">Open tensor →</a>
+<a href="Trace.dc.html" class="m" style="height: 38px; display: flex; align-items: center; justify-content: center; border: 1px solid #111111;">Trace from here</a>
+</div>
+</aside>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  rng(seed) {
+    let s = seed >>> 0;
+    return function () { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  data() {
+    return [
+      { id: 'input', idx: 1, op: 'INPUT', name: 'x', path: 'input', top: 20, out: '1×3×224×224', outShort: '3×224×224', io: true, attr: .05, rank: 71, params: '—', flops: '—', from: '—', to: 'stem.conv1', mean: '0.02', std: '1.00', min: '-2.12', max: '2.64', zero: '0%' },
+      { id: 'stem', idx: 2, op: 'MODULE · 4 OPS', name: 'stem', path: 'conv1 → maxpool', top: 84, out: '1×64×56×56', outShort: '64×56×56', collapsed: true, attr: .12, rank: 9, params: '9,536', flops: '118 M', from: 'input', to: 'layer1.0.conv1\nlayer1.0 (identity)', mean: '0.61', std: '0.88', min: '0.00', max: '6.40', zero: '38%' },
+      { id: 'conv1', idx: 9, op: 'CONV2D', name: 'conv1', path: 'layer1.0.conv1', top: 172, out: '1×64×56×56', outShort: '64×56×56', attr: .31, rank: 6, params: '36,864', flops: '116 M', from: 'stem.maxpool', to: 'layer1.0.bn1', mean: '-0.08', std: '1.43', min: '-7.92', max: '6.15', zero: '0%' },
+      { id: 'bn1', idx: 10, op: 'BATCHNORM2D', name: 'bn1', path: 'layer1.0.bn1', top: 236, out: '1×64×56×56', outShort: '64×56×56', attr: .28, rank: 7, params: '128', flops: '0.8 M', from: 'layer1.0.conv1', to: 'layer1.0.relu', mean: '0.01', std: '0.97', min: '-4.10', max: '4.77', zero: '0%' },
+      { id: 'relu', idx: 11, op: 'RELU', name: 'relu', path: 'layer1.0.relu', top: 300, out: '1×64×56×56', outShort: '64×56×56', relu: true, attr: .26, rank: 8, params: '—', flops: '0.2 M', from: 'layer1.0.bn1', to: 'layer1.0.conv2', mean: '0.39', std: '0.62', min: '0.00', max: '4.77', zero: '51%' },
+      { id: 'conv2', idx: 12, op: 'CONV2D', name: 'conv2', path: 'layer1.0.conv2', top: 364, out: '1×64×56×56', outShort: '64×56×56', attr: .47, rank: 3, params: '36,864', flops: '116 M', from: 'layer1.0.relu', to: 'layer1.0.bn2', mean: '-0.21', std: '1.18', min: '-6.30', max: '5.02', zero: '0%' },
+      { id: 'bn2', idx: 13, op: 'BATCHNORM2D', name: 'bn2', path: 'layer1.0.bn2', top: 428, out: '1×64×56×56', outShort: '64×56×56', attr: .44, rank: 4, params: '128', flops: '0.8 M', from: 'layer1.0.conv2', to: 'layer1.0.add', mean: '0.00', std: '1.01', min: '-4.48', max: '4.21', zero: '0%' },
+      { id: 'add', idx: 14, op: 'ADD', name: '+ identity', path: 'layer1.0.add', top: 494, out: '1×64×56×56', outShort: '64×56×56', attr: .58, rank: 2, params: '—', flops: '0.2 M', from: 'layer1.0.bn2\nstem (identity)', to: 'layer1.0.relu', mean: '0.60', std: '1.32', min: '-3.90', max: '8.11', zero: '0%' },
+      { id: 'relu2', idx: 15, op: 'RELU', name: 'relu', path: 'layer1.0.relu_1', top: 558, out: '1×64×56×56', outShort: '64×56×56', relu: true, attr: .55, rank: 5, params: '—', flops: '0.2 M', from: 'layer1.0.add', to: 'layer1.1.conv1\nlayer1.1 (identity)', mean: '0.83', std: '1.04', min: '0.00', max: '8.11', zero: '34%' },
+      { id: 'l11', idx: 16, op: 'MODULE · 7 OPS', name: 'layer1.1', path: 'layer1.1', top: 636, out: '1×64×56×56', outShort: '64×56×56', collapsed: true, attr: .36, rank: 10, params: '73,984', flops: '232 M', from: 'layer1.0.relu_1', to: 'layer2.0', mean: '0.91', std: '1.21', min: '0.00', max: '9.37', zero: '31%' },
+      { id: 'rest', idx: 23, op: 'MODULE · 44 OPS', name: 'layer2 → layer4', path: 'layer2 … layer4', top: 700, out: '1×512×7×7', outShort: '512×7×7', collapsed: true, attr: .92, rank: 1, params: '11.0 M', flops: '1.36 G', from: 'layer1.1', to: 'avgpool', mean: '0.94', std: '1.66', min: '0.00', max: '14.8', zero: '47%' },
+      { id: 'head', idx: 67, op: 'MODULE · 4 OPS', name: 'avgpool → fc', path: 'avgpool → fc', top: 764, out: '1×1000', outShort: '1000', collapsed: true, attr: 1, rank: 1, params: '513,000', flops: '0.5 M', from: 'layer4.1.relu_1', to: 'output', mean: '0.00', std: '2.87', min: '-8.40', max: '17.9', zero: '0%' }
+    ];
+  }
+  renderVals() {
+    const selId = (this.state && this.state.sel) || 'conv2';
+    const data = this.data();
+    const self = this;
+    const nodes = data.map(function (n) {
+      const on = n.id === selId;
+      const border = on ? '1.5px solid #3B4BDB' : (n.io ? '1px dashed #111111' : '1px solid #111111');
+      const bg = on ? '#E6E8FB' : '#FAFAF8';
+      const shadow = n.collapsed ? '4px 4px 0 -1px #F4F4F1, 4px 4px 0 0 #111111' : 'none';
+      return {
+        op: n.op, name: n.name, outShort: n.outShort,
+        pick: function () { self.setState({ sel: n.id }); },
+        style: 'position: absolute; left: 300px; top: ' + n.top + 'px; width: 200px; height: 44px; box-sizing: border-box; padding: 0 10px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 1px; text-align: left; font: inherit; color: #111111; cursor: pointer; background: ' + bg + '; border: ' + border + '; border-radius: 2px; box-shadow: ' + shadow + ';',
+        bar: 'position: absolute; left: 0; bottom: 0; height: 3px; width: ' + Math.round(n.attr * 100) + '%; background: #3B4BDB; opacity: ' + (0.35 + n.attr * 0.65).toFixed(2) + ';'
+      };
+    });
+    const s = data.filter(function (n) { return n.id === selId; })[0];
+    const r = this.rng(s.idx * 131 + 7);
+    const hist = [];
+    for (let i = 0; i < 32; i++) {
+      const t = i / 31;
+      let h;
+      if (s.relu) h = i === 0 ? 60 : Math.exp(-t * 4) * 34 + r() * 5 + 2;
+      else h = Math.exp(-Math.pow((t - 0.5) / 0.17, 2)) * 54 + r() * 6 + 2;
+      hist.push({ style: 'flex-grow: 1; height: ' + h.toFixed(0) + 'px; background: ' + ((s.relu && i === 0) ? '#3B4BDB' : '#111111') + ';' });
+    }
+    const sel = {
+      idx: s.idx, path: s.path, op: s.op, outShort: s.outShort, rank: s.rank, attr: s.attr.toFixed(2), from: s.from, to: s.to,
+      attrBar: 'width: ' + Math.round(s.attr * 100) + '%; background: #3B4BDB;',
+      rows: [{ k: 'Op', v: s.op.toLowerCase() }, { k: 'Output', v: s.out }, { k: 'Params', v: s.params }, { k: 'FLOPs', v: s.flops }, { k: 'Device', v: 'cuda:0' }, { k: 'Saved', v: s.io ? '0.6 MB' : '0.8 MB' }],
+      hist: hist,
+      stats: [{ k: 'Mean', v: s.mean }, { k: 'Std', v: s.std }, { k: 'Max', v: s.max }, { k: 'Zero', v: s.zero }]
+    };
+    const treeSrc = [
+      ['resnet18', 'ResNet', 0], ['conv1', 'Conv2d', 1], ['bn1', 'BN2d', 1], ['relu', 'ReLU', 1], ['maxpool', 'Pool', 1],
+      ['layer1', 'Seq', 1], ['0', 'Block', 2], ['conv1', 'Conv2d', 3, 'conv1'], ['bn1', 'BN2d', 3, 'bn1'], ['relu', 'ReLU', 3, 'relu'], ['conv2', 'Conv2d', 3, 'conv2'], ['bn2', 'BN2d', 3, 'bn2'],
+      ['1', 'Block', 2, 'l11'], ['layer2', 'Seq', 1], ['layer3', 'Seq', 1], ['layer4', 'Seq', 1], ['avgpool', 'Pool', 1], ['fc', 'Linear', 1]
+    ];
+    const tree = treeSrc.map(function (t) {
+      const on = t[3] && t[3] === selId;
+      return {
+        name: t[0], type: t[1],
+        pad: 'width: ' + (t[2] * 14) + 'px; flex-shrink: 0; align-self: stretch; border-right: ' + (t[2] > 0 ? '1px solid #E3E3DE' : '0') + '; margin-right: 8px;',
+        style: 'display: flex; align-items: center; height: 27px; padding: 0 8px; border-radius: 4px; background: ' + (on ? '#E6E8FB' : 'transparent') + '; color: ' + (on ? '#3B4BDB' : '#111111') + ';'
+      };
+    });
+    return { nodes: nodes, sel: sel, tree: tree };
+  }
+}
+</script>
+</body>
+</html>

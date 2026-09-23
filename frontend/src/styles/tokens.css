@@ -1,0 +1,28 @@
+/*
+ * Dissect design tokens. Mirrors design/tokens.json; change both together.
+ * Look: warm paper ground, 1px ink hairlines, mono uppercase labels,
+ * one blue accent for positive/selected, rust for negative.
+ */
+:root {
+  --paper: #f4f4f1;        /* app ground */
+  --panel: #fafaf8;        /* raised panels, nodes, cards */
+  --ink: #111111;          /* text, strokes */
+  --ink-2: #5e5e59;        /* secondary text (6:1 on paper) */
+  --line: #d6d6d1;         /* hairlines between regions */
+  --line-soft: #e3e3de;    /* row separators */
+  --line-faint: #c4c4be;   /* inactive edges, weak dots */
+  --muted-fill: #e6e6e1;   /* active nav, track backgrounds */
+
+  --accent: #3b4bdb;       /* positive attribution, selection, focus */
+  --accent-soft: #e6e8fb;  /* selected fills */
+  --negative: #d9531e;     /* negative attribution marks */
+  --negative-text: #b8431a;
+
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --label-size: 10.5px;    /* mono uppercase labels */
+  --label-track: 0.05em;
+  --radius: 2px;
+  --topbar-h: 52px;
+}

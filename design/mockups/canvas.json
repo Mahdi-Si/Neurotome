@@ -1,0 +1,70 @@
+{
+  "v": 3,
+  "attachments": {},
+  "createdOnFiles": {
+    "at": "2026-09-23T01:25:18.354Z",
+    "v": 1
+  },
+  "title": "Model Dissection UI",
+  "launch": {
+    "view": "canvas"
+  },
+  "pages": [],
+  "boards": {
+    "Home.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "01 \u00b7 Home",
+      "is_interactive": true
+    },
+    "Main.dc.html": {
+      "x": 1520,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "02 \u00b7 Graph workspace",
+      "is_interactive": true
+    },
+    "Tensor.dc.html": {
+      "x": 0,
+      "y": 1020,
+      "w": 1440,
+      "h": 900,
+      "title": "03 \u00b7 Tensor inspector",
+      "is_interactive": true
+    },
+    "Trace.dc.html": {
+      "x": 1520,
+      "y": 1020,
+      "w": 1440,
+      "h": 900,
+      "title": "04 \u00b7 Attribution trace",
+      "is_interactive": true
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Home.dc.html",
+    "Tensor.dc.html",
+    "Trace.dc.html"
+  ],
+  "notes": {
+    "title": {
+      "x": 0,
+      "y": -300,
+      "text": "Dissect \u2014 visual direction v0",
+      "kind": "title1",
+      "maxW": 2960
+    },
+    "data": {
+      "x": 3040,
+      "y": 0,
+      "text": "Placeholder content: the name \"Dissect\", model runs, shapes and every number are sample data to show the look, not real outputs.\n\nClick nodes in 02, channels in 03 and methods in 04 \u2014 they respond.",
+      "w": 300,
+      "fill": "gray"
+    }
+  },
+  "designSystems": []
+}

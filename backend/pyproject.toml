@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dissect"
+version = "0.1.0"
+description = "Open a PyTorch model and see every signal: computation graph, activations and attribution in one UI."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2",
+  "torchvision>=0.17",
+  # TorchLens changes its API between minor versions; the adapter in
+  # dissect/capture.py is written against 2.34. Bump deliberately.
+  "torchlens>=2.34,<2.35",
+  "captum>=0.9,<0.10",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "python-multipart>=0.0.9",
+  "numpy>=1.26",
+  "pillow>=10",
+  "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5"]
+
+[project.scripts]
+dissect = "dissect.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dissect*"]
+
+[tool.setuptools.package-data]
+dissect = ["static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning", "ignore::FutureWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["B008"]  # FastAPI File(...) defaults
