@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,10 +18,10 @@ from .config import get_settings
 from .errors import describe
 from .graph import graph_view, module_tree, search_index, unsaved
 from .jobs import TERMINAL, Job
-from .models import SUGGESTED_MODELS
-from .runs import RunManager
+from .models import SUGGESTED_MODELS, TEXT_MODELS
+from .runs import RunManager, _module
 from .slicing import SliceTooLarge, slice_npy, slice_table
-from .store import PREVIEW, RunStore, safe_name
+from .store import PREVIEW, safe_name
 from .tensors import tensor_diff, tensor_view
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -28,8 +29,9 @@ _JSON = TypeAdapter(Any)
 
 
 class Sample(BaseModel):
-    kind: str = Field(default="random", pattern="^(random|upload)$")
+    kind: str = Field(default="random", pattern="^(random|upload|text)$")
     upload_id: str | None = None
+    text: str | None = Field(default=None, max_length=10000)  # kind text
     name: str | None = None
     shape: list[int] | None = None
     seed: int = 0
@@ -42,6 +44,7 @@ class CreateRun(BaseModel):
     modules: list[str] | None = None  # module addresses; None or [] = every op
     # per-run override of NEUROTOME_MAX_CAPTURE_MB
     max_capture_mb: float | None = Field(None, gt=0, allow_inf_nan=False)
+    backend: Literal["torchlens", "nnsight"] | None = None  # None = auto (NNsight above nnsight_params)
 
 
 class Objective(BaseModel):
@@ -57,9 +60,9 @@ class AttributionRequest(BaseModel):
 
 
 class JobRequest(BaseModel):
-    kind: Literal["attribution", "layer", "neuron", "agreement", "patch"]
+    kind: Literal["attribution", "layer", "neuron", "agreement", "patch", "lens"]
     method: str | None = None  # attribution: gxa|saliency|ig (default ig); layer: layer_ig|layer_cond
-    target: int | None = None
+    target: int | None = None  # lens: a token id, None = the top prediction
     objective: Objective | None = None
     steps: int = Field(32, ge=1, le=512)
     op: str | None = None  # layer / neuron / patch; agreement: optional (units block)
@@ -71,9 +74,7 @@ class JobRequest(BaseModel):
 def create_app(manager: RunManager | None = None) -> FastAPI:
     settings = get_settings()
     if manager is None:
-        manager = RunManager(
-            RunStore(settings.runs_dir), settings.device, settings.max_capture_bytes, settings.max_live_models
-        )
+        manager = RunManager.from_settings(settings)
     store = manager.store
     app = FastAPI(title="Neurotome", version=__version__)
     app.state.manager = manager
@@ -148,7 +149,16 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
 
     @app.get("/api/models")
     def models() -> dict[str, Any]:
-        return {"suggested": SUGGESTED_MODELS, "methods": METHODS}
+        return {
+            "suggested": SUGGESTED_MODELS,
+            "methods": METHODS,
+            "text": TEXT_MODELS,
+            "backends": {
+                "hf": importlib.util.find_spec("transformers") is not None,
+                "nnsight": _module("nnsight").available(),
+            },
+            "nnsight_params": manager.nnsight_params,
+        }
 
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
@@ -164,9 +174,11 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
 
     @app.post("/api/runs", status_code=202)
     def create_run(req: CreateRun) -> dict[str, Any]:
-        """Start a capture job; its result is the run meta. 400 for a bad spec prefix or a missing upload."""
+        """Start a capture job; its result is the run meta. 400 for a bad spec prefix, a missing upload, an
+        empty text sample or the nnsight backend without its package."""
         sample = req.sample.model_dump()
-        job = manager.start_capture(req.model, req.weights, sample, req.modules, req.max_capture_mb)
+        job = manager.start_capture(req.model, req.weights, sample, req.modules, req.max_capture_mb,
+                                    req.backend)  # fmt: skip
         return job.to_json()
 
     @app.get("/api/runs/{run_id}")

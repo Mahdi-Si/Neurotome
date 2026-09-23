@@ -63,7 +63,7 @@ describe("runJob without EventSource", () => {
 });
 
 describe("followJob for a capture", () => {
-  const body: CreateRun = { model: "py:examples.custom_model:build", weights: null, sample: { kind: "random" }, modules: ["blocks.0"], max_capture_mb: 64 };
+  const body: CreateRun = { model: "py:examples.custom_model:build", weights: null, sample: { kind: "random" }, modules: ["blocks.0"], max_capture_mb: 64, backend: null };
   const cap = (o: Partial<Job>) => job({ kind: "capture", run_id: null, ...o });
   it("posts /api/runs, polls to done and resolves the run meta", async () => {
     const meta = { id: "run_0009" } as RunMeta;

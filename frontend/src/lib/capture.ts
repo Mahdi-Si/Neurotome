@@ -24,9 +24,14 @@ const UNSAVED: Record<Unsaved, string> = {
 };
 export const unsavedText = (u: Unsaved | null | undefined) => (u ? UNSAVED[u] : "");
 
-/** The banner for a partial capture, or null for a complete one. */
-export function captureNote(meta: RunMeta): { tag: "Truncated" | "Selective"; text: string } | null {
-  const { truncated, budget_bytes, capture_modules: mods, saved_ops, num_ops } = meta.model;
+const VISION = /vit|deit|beit|swin|convnext|resnet|dino|detr|clip|siglip|image|segformer|mobilenet|efficientnet|regnet|yolo/i;
+
+/** The Home form defaults to a text sample for a known text model or any hf: spec that does not look like vision. */
+export const isTextSpec = (spec: string, text: string[]) => text.includes(spec) || (/^hf:/i.test(spec) && !VISION.test(spec));
+
+/** The banner for a partial capture or an NNsight (module-level) run, or null for a complete TorchLens one. */
+export function captureNote(meta: RunMeta): { tag: "Truncated" | "Selective" | "Modules"; text: string } | null {
+  const { truncated, budget_bytes, capture_modules: mods, saved_ops, num_ops, backend } = meta.model;
   const count = saved_ops != null ? ` · ${saved_ops}/${num_ops} ops saved · ∅ nodes have no tensor` : "";
   if (truncated) {
     if (saved_ops == null) return { tag: "Truncated", text: "Capture budget reached · some ops have no tensor" };
@@ -34,5 +39,6 @@ export function captureNote(meta: RunMeta): { tag: "Truncated" | "Selective"; te
     return { tag: "Truncated", text: `Capture budget${budget} reached${count}${mods?.length ? ` · modules ${mods.join(", ")}` : ""}` };
   }
   if (mods?.length) return { tag: "Selective", text: `Tensors saved inside ${mods.join(", ")}${count}` };
+  if (backend === "nnsight") return { tag: "Modules", text: `NNsight capture · module outputs only · ${num_ops} module calls` };
   return null;
 }

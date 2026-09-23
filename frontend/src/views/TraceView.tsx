@@ -5,13 +5,15 @@ import { GraphCanvas } from "../components/GraphCanvas";
 import { Crosshair } from "../components/Icons";
 import { InputOverlay, OverlayControls } from "../components/InputOverlay";
 import { JobProgress } from "../components/JobProgress";
+import { TokenStrip } from "../components/TokenStrip";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
 import { fileName } from "../lib/exportPng";
-import { displayName, num, pct, signed } from "../lib/format";
+import { deltaLarge, displayName, num, pct, signed } from "../lib/format";
 import { useJob } from "../lib/jobs";
 import { href, navigate, type Route } from "../lib/router";
 import { errText } from "../lib/tensorState";
+import { tokenLabels } from "../lib/tokens";
 import { attrRequest, layerOp, logitsBlocked, parseTraceParams, traceParams, type TraceState } from "../lib/traceState";
 import type { AgreementResult, Attribution, GraphView, Job, LayerMethod, LayerResult, Method, NeuronResult, RunMeta } from "../lib/types";
 
@@ -141,6 +143,9 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
       ? attr.objective_label : `${s.obj.op} · ch ${s.obj.channel} · Σ spatial`;
   const neuronOn = s.nc != null;
   const map = neuronOn ? nr?.input.map : attr?.input?.map;
+  const toks = neuronOn ? null : attr?.tokens ?? null;   // token inputs: Layer IG / g×a / saliency on the embeddings
+  const ig = attr?.input?.convergence_delta != null ? attr.input : attr?.tokens;
+  const delta = ig?.convergence_delta;
   const mapName = neuronOn ? fileName([run.id, "neuron", s.lop, `c${s.nc}`], "png") : fileName([run.id, attr?.method, "attr"], "png");
   const layerMethod = s.layer ?? pick;
 
@@ -191,8 +196,9 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
         </div>
         <div style={{ flexGrow: 1 }} />
         {main.job && main.job.status !== "done" && <div style={{ width: 240 }}><JobProgress job={main.job} onCancel={main.cancel} /></div>}
-        {attr?.input?.convergence_delta != null && (
-          <span className="lbl dim">Completeness Δ <span style={{ color: "var(--ink)" }}>{num(attr.input.convergence_delta, 4)}</span></span>
+        {delta != null && (
+          <span className="lbl dim">Completeness Δ <span style={{ color: "var(--ink)" }}>{num(delta, 4)}</span>
+            {deltaLarge(delta, ig?.total ?? 0) && <> · Δ large vs Σ {num(ig?.total, 3)} · raise steps{toks ? " (≥128 for token IG)" : ""}</>}</span>
         )}
       </div>
       {run.output_error && <div className="err mono" style={{ padding: "8px 20px", borderBottom: "1px solid var(--line)" }}>{run.output_error}</div>}
@@ -200,9 +206,9 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
         <aside className="scroll" style={{ width: 400, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><Crosshair /><span className="lbl dim">Input · {run.input_shape?.join("×")}</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12 }}>
-            <span className="num" style={{ fontSize: 26, fontWeight: 500, letterSpacing: "-0.03em" }}>{neuronOn ? "NEURON" : "SALIENCY"}</span>
+            <span className="num" style={{ fontSize: 26, fontWeight: 500, letterSpacing: "-0.03em" }}>{neuronOn ? "NEURON" : toks ? "TOKENS" : "SALIENCY"}</span>
             <span className="lbl" style={{ textAlign: "right" }}>
-              {neuronOn ? `${nr?.method_label ?? NEURON_LABEL} · ${nr?.path ?? s.lop ?? "—"} · ch ${s.nc}` : attr?.method_label ?? "—"}
+              {neuronOn ? `${nr?.method_label ?? NEURON_LABEL} · ${nr?.path ?? s.lop ?? "—"} · ch ${s.nc}` : toks?.method_label ?? attr?.method_label ?? "—"}
             </span>
           </div>
           {neuronOn && (
@@ -214,7 +220,10 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
           )}
           {map && <OverlayControls run={run} on={overlay} onOn={setOverlay} alpha={alpha} onAlpha={setAlpha} />}
           <div className="rule-top" style={{ paddingTop: 12, borderBottom: "1px solid var(--line)" }}>
-            {map
+            {toks
+              ? <TokenStrip tokens={tokenLabels(run, toks.scores.length) ?? run.sample.token_ids?.map(String) ?? toks.scores.map((_, i) => `#${i}`)}
+                  scores={toks.scores} signed={toks.signed} />
+              : map
               ? overlay && run.preview
                 ? <InputOverlay run={run} grid={map} signed alpha={alpha} label={neuronOn ? "Neuron conductance over input" : "Input attribution over input"}
                     exportName={mapName.replace(/\.png$/, "_overlay.png")} readout={(r, c, v) => `cell (${r}, ${c}) · rel ${num(v, 3)}`} />
@@ -226,9 +235,13 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
                   </div>}
           </div>
           <div className="lbl dim" style={{ display: "flex", gap: 16 }}>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />Supports</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", border: "1px solid var(--negative)" }} />Opposes</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", border: "1px solid var(--ink)" }} />Weak</span>
+            {toks && !toks.signed ? <span>Magnitude · unsigned</span> : (
+              <>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />Supports</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", border: "1px solid var(--negative)" }} />Opposes</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", border: "1px solid var(--ink)" }} />Weak</span>
+              </>
+            )}
           </div>
           {attr && (
             <div className="rule-top">
@@ -302,7 +315,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
                     <Kv rows={[
                       ["Method", lr.method_label],
                       ["Σ", num(lr.total, 4)],
-                      ["Completeness Δ", num(lr.convergence_delta, 4)],
+                      ["Completeness Δ", num(lr.convergence_delta, 4) + (deltaLarge(lr.convergence_delta, lr.total) ? " · large, raise steps" : "")],
                       ["Objective", lr.objective_label],
                     ]} />
                     {lr.top.slice(0, 5).map((u) => (

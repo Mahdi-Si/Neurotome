@@ -26,6 +26,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5", "pyright>=1.1.390", "build>=1.2"]
+# hf:<repo_id> model specs (tokenizers, image processors); imported lazily by neurotome/models.py
+hf = ["transformers>=4.56", "accelerate>=1.0"]  # 4.56: from_pretrained(dtype=), set_attn_implementation
+# the NNsight capture backend (module outputs); imported lazily by neurotome/capture_nnsight.py
+nnsight = ["nnsight>=0.7,<0.8"]
 # docs site tooling; never imported by the package
 docs = ["mkdocs-material>=9.5", "mike>=2.1"]
 

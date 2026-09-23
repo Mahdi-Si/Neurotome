@@ -8,7 +8,9 @@ const TABS: { tab: Tab; label: string }[] = [
   { tab: "graph", label: "Graph" },
   { tab: "tensors", label: "Tensors" },
   { tab: "trace", label: "Trace" },
+  { tab: "lens", label: "Lens" },
 ];
+const tabStyle: React.CSSProperties = { display: "flex", alignItems: "center", padding: "0 14px", marginBottom: -1 };
 
 export function TopBar({ run, tab, node, children }: {
   run: RunMeta | null; tab: Tab; node?: string | null; children?: React.ReactNode;
@@ -33,14 +35,16 @@ export function TopBar({ run, tab, node, children }: {
       )}
       {run && (
         <nav style={{ alignSelf: "stretch", display: "flex", marginLeft: 16, flexShrink: 0 }} aria-label="Views">
-          {TABS.map((t) => (
-            <a key={t.tab} href={href(run.id, t.tab, { node })} className="lbl"
+          {TABS.map((t) => t.tab === "lens" && !run.model.lm ? (
+            <span key={t.tab} className="lbl" aria-disabled="true" title="Logit lens needs a causal language model"
+              style={{ ...tabStyle, color: "var(--ink-2)", opacity: 0.45, borderBottom: "1.5px solid transparent" }}>{t.label}</span>
+          ) : (
+            <a key={t.tab} href={href(run.id, t.tab, t.tab === "lens" ? {} : { node })} className="lbl"
               aria-current={t.tab === tab ? "page" : undefined}
               style={{
-                display: "flex", alignItems: "center", padding: "0 14px",
+                ...tabStyle,
                 color: t.tab === tab ? "var(--ink)" : "var(--ink-2)",
                 borderBottom: t.tab === tab ? "1.5px solid var(--ink)" : "1.5px solid transparent",
-                marginBottom: -1,
               }}>{t.label}</a>
           ))}
         </nav>

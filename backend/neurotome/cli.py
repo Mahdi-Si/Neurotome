@@ -20,9 +20,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--reload", action="store_true", help="auto-reload on code changes (development)")
 
     c = sub.add_parser("capture", help="capture a run without starting the server")
-    c.add_argument("model", help="torchvision:resnet18 or py:package.module:factory")
-    c.add_argument("--weights", default=None, help="DEFAULT or a torchvision weights enum name")
-    c.add_argument("--image", default=None, help="path to an image to use as the sample")
+    c.add_argument("model", help="torchvision:resnet18, hf:gpt2 or py:package.module:factory")
+    c.add_argument("--weights", default=None, help="DEFAULT (pretrained) or a torchvision weights enum name")
+    source = c.add_mutually_exclusive_group()
+    source.add_argument("--image", default=None, help="path to an image to use as the sample")
+    source.add_argument("--text", default=None, help="text sample for a model with a tokenizer")
+    c.add_argument("--backend", choices=["torchlens", "nnsight"], default=None,
+                   help="default: auto (NNsight above NEUROTOME_NNSIGHT_PARAMS)")  # fmt: skip
     c.add_argument("--runs-dir", default=None)
     c.add_argument("--modules", default=None, help="save tensors only inside these modules: layer3,layer4")
     c.add_argument("--max-capture-mb", type=float, default=None, help="capture budget for this run (MB)")
@@ -47,11 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "capture":
         from .config import get_settings
         from .runs import RunManager
-        from .store import RunStore
 
         st = get_settings()
-        mgr = RunManager(RunStore(st.runs_dir), st.device, st.max_capture_bytes, st.max_live_models)
-        sample = {"kind": "random"}
+        mgr = RunManager.from_settings(st)
+        sample: dict = {"kind": "random"}
+        if args.text is not None:
+            sample = {"kind": "text", "text": args.text}
         if args.image:
             with open(args.image, "rb") as f:
                 sample = {
@@ -60,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
                     "name": os.path.basename(args.image),
                 }
         modules = args.modules.split(",") if args.modules else None
-        meta = mgr.create_from_spec(args.model, args.weights, sample, modules, args.max_capture_mb)
+        meta = mgr.create_from_spec(args.model, args.weights, sample, modules, args.max_capture_mb,
+                                    backend=args.backend)  # fmt: skip
         json.dump({k: meta[k] for k in ("id", "model", "sample", "output")}, sys.stdout, indent=2)
         print()
         return 0

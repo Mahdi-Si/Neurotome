@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { captureNote, hasTensor, parseBudget, parseModules, unsavedText } from "./capture";
+import { captureNote, hasTensor, isTextSpec, parseBudget, parseModules, unsavedText } from "./capture";
 import type { GraphNode, RunMeta, Stats } from "./types";
 
 const meta = (model: Partial<RunMeta["model"]>): RunMeta => ({
@@ -19,6 +19,16 @@ describe("capture form", () => {
     expect(parseModules(" a,b ,, c\n")).toEqual(["a", "b", "c"]);
     expect(parseModules("")).toBeNull();
     expect(parseModules(" , ")).toBeNull();
+  });
+  it("knows text models", () => {
+    const text = ["hf:gpt2", "hf:Qwen/Qwen2.5-0.5B"];
+    expect(isTextSpec("hf:gpt2", text)).toBe(true);
+    expect(isTextSpec("hf:meta-llama/Llama-3.2-1B", text)).toBe(true);
+    expect(isTextSpec("hf:google/vit-base-patch16-224", text)).toBe(false);
+    expect(isTextSpec("HF:microsoft/resnet-50", text)).toBe(false);
+    expect(isTextSpec("torchvision:resnet18", text)).toBe(false);
+    expect(isTextSpec("py:examples.tiny_lm:build", text)).toBe(false);
+    expect(isTextSpec("py:examples.tiny_lm:build", ["py:examples.tiny_lm:build"])).toBe(true);
   });
   it("parses the budget", () => {
     expect(parseBudget("")).toBeNull();
@@ -54,5 +64,12 @@ describe("partial captures", () => {
       { tag: "Selective", text: "Tensors saved inside layer3, layer4 · 212/1210 ops saved · ∅ nodes have no tensor" });
     expect(captureNote(meta({ saved_ops: 1210, budget_bytes: G, capture_modules: null }))).toBeNull();
     expect(captureNote(meta({}))).toBeNull();
+    expect(captureNote(meta({ backend: "torchlens" }))).toBeNull();
+  });
+  it("tags NNsight runs as module-level", () => {
+    expect(captureNote(meta({ backend: "nnsight", granularity: "module", num_ops: 48, saved_ops: 48 }))).toEqual(
+      { tag: "Modules", text: "NNsight capture · module outputs only · 48 module calls" });
+    expect(captureNote(meta({ backend: "nnsight", truncated: true }))?.tag).toBe("Truncated");
+    expect(captureNote(meta({ backend: "nnsight", capture_modules: ["h.0"] }))?.tag).toBe("Selective");
   });
 });

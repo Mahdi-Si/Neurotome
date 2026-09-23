@@ -157,7 +157,7 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
         <aside className="panel" style={{ width: 360, flexShrink: 0, borderLeft: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {view && <Inspector runId={run.id} view={view} node={selected} total={view.nodes.length}
             linkFor={(id) => href(run.id, "graph", state({ node: id }))}
-            patch={{
+            patch={run.model.backend === "nnsight" ? undefined : {  // patching replays TorchLens ops
               spec: run.model.spec, weights: run.model.weights, state: ps, job: pj.job, error: pj.error, result: patchResult, onCancel: pj.cancel,
               onApply: (p) => { go({ ...patchParams(p), color: "patch" }); setNonce((n) => n + 1); },
               onClear: () => go({ ...patchParams(null), ...(color === "patch" && { color: null }) }),

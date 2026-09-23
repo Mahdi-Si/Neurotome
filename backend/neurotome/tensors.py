@@ -7,6 +7,7 @@ shape (after dropping the batch axis):
                           channel vector at a pixel, PCA of spatial positions
 * ``sequence`` (T, D)     token x feature heatmap, per-token norm, PCA of tokens
 * ``vector``   (D,)       1D signal and histogram
+* ``attention`` (H, T, T) rows are distributions over keys (softmax): per-head maps and pattern summary
 
 Higher-rank tensors are folded into ``image`` (leading axes merged into channels).
 Image maps are scaled per channel or on one global range (``norm``), sequentially to
@@ -89,7 +90,7 @@ def _pca2(x: np.ndarray, max_points: int = 400) -> tuple[np.ndarray, np.ndarray,
     """PCA of rows of x (N, D) -> (idx, coords (k, 2), explained ratios)."""
     n = x.shape[0]
     idx = np.linspace(0, n - 1, num=min(n, max_points)).astype(int)
-    sub = np.asarray(x[idx], dtype=np.float64)
+    sub = np.nan_to_num(np.asarray(x[idx], dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
     sub = sub - sub.mean(axis=0, keepdims=True)
     if sub.shape[1] < 2 or not np.any(sub):
         return idx, np.zeros((len(idx), 2)), [0.0, 0.0]
@@ -129,6 +130,8 @@ def tensor_view(
     a = _drop_batch(a)
     if a.ndim > 3:
         a = a.reshape(-1, *a.shape[-2:])
+    if _is_attention(a):
+        return _attention_view(a, shape, channel)
     given = None  # the caller's [lo, hi] for norm=global
     if norm == "global" and lo is not None and hi is not None and bool(np.isfinite([lo, hi]).all()):
         given = [float(lo), float(hi)]
@@ -192,6 +195,57 @@ def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scal
         "hist": _hist(ch),
         "vector": {"pixel": [int(py), int(px)], "values": _r(_pool1d(vec, 512))},
         "pca": {"points": _r(coords), "color": _r(color, 2), "explained": _r(np.array(ratios), 3)},
+    }
+
+
+def _is_attention(a: np.ndarray) -> bool:
+    """(H, T, T) with every query row a probability distribution over keys (softmax output; bf16 rows sum to
+    1 +- ~3e-3)."""
+    if a.ndim != 3 or a.shape[1] != a.shape[2] or a.shape[1] <= 1 or not np.isfinite(a).all():
+        return False
+    return bool(a.min() >= -1e-6 and a.max() <= 1 + 1e-6 and np.abs(a.sum(-1) - 1).max() <= 1e-2)
+
+
+def _unit_map(g: np.ndarray, nd: int) -> dict[str, Any]:
+    m = float(g.max())
+    return {"map": _r(g / m if m > 0 else np.zeros_like(g), nd), "max": m}
+
+
+def _head_summary(h: int, p: np.ndarray) -> dict[str, Any]:
+    T = p.shape[0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ent = -np.where(p > 0, p * np.log2(p), 0.0).sum(-1)
+    q = np.arange(T)
+    s = {
+        "head": h,
+        "entropy": float(ent.mean()),
+        "prev": float(p[q[1:], q[1:] - 1].mean()),
+        "first": float(p[:, 0].mean()),
+        "self": float(p[q, q].mean()),
+    }
+    names = (("previous", "prev"), ("first", "first"), ("self", "self"))
+    return s | {"pattern": next((n for n, k in names if s[k] > 0.5), None)}
+
+
+def _attention_view(a: np.ndarray, shape: list[int], channel: int | None) -> dict[str, Any]:
+    H, T, _ = a.shape
+    head = min(max(int(channel or 0), 0), H - 1)
+    return {
+        "kind": "attention",
+        "shape": shape,
+        "heads": H,
+        "tokens": T,
+        "head": head,
+        "maps": [{"head": h} | _unit_map(pool2d(a[h], 64, 64), 2) for h in range(min(H, 64))],
+        "full": _unit_map(pool2d(a[head], 128, 128), 3),
+        "summary": [_head_summary(h, a[h].astype(np.float64)) for h in range(H)],
+        "stats": {
+            "mean": float(a.mean()),
+            "std": float(a.std()),
+            "min": float(a.min()),
+            "max": float(a.max()),
+        },
+        "hist": _hist(a[head]),
     }
 
 

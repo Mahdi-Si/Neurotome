@@ -4,6 +4,7 @@ Quick use from a script or notebook::
 
     import neurotome
     neurotome.open(model, x)          # capture, then serve the UI at http://127.0.0.1:7070
+    neurotome.open(lm, ids, tokenizer=tok)   # token labels and, for a causal LM, the logit lens
 """
 
 from __future__ import annotations
@@ -21,11 +22,13 @@ def open(
     categories: list[str] | None = None,
     port: int | None = None,
     block: bool = True,
+    tokenizer: Any = None,
 ) -> str:
     """Capture ``model(inputs)`` as a new run and serve the UI.
 
     ``block=False`` starts the server in a background thread (useful in notebooks)
-    and returns the run URL immediately.
+    and returns the run URL immediately. ``tokenizer`` (``encode`` / ``decode``, e.g. a Hugging Face
+    tokenizer) labels token ids and, for a causal LM, enables the logit lens.
     """
     import threading
 
@@ -34,11 +37,10 @@ def open(
     from .api import create_app
     from .config import get_settings
     from .runs import RunManager
-    from .store import RunStore
 
     st = get_settings()
-    mgr = RunManager(RunStore(st.runs_dir), st.device, st.max_capture_bytes, st.max_live_models)
-    meta = mgr.create_from_objects(model, inputs, name=name, categories=categories)
+    mgr = RunManager.from_settings(st)
+    meta = mgr.create_from_objects(model, inputs, name=name, categories=categories, tokenizer=tokenizer)
     port = port or st.port
     url = f"http://{st.host}:{port}/#/runs/{meta['id']}/graph"
     print(f"Neurotome -> {url}")

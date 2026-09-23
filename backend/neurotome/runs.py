@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 import io
 import math
 import threading
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -26,11 +28,22 @@ from .attribution import (
     objective_forward,
     unit_label,
 )
-from .capture import capture, patch
+from .capture import capture
 from .errors import ModelUnavailable, describe
 from .graph import module_calls, module_site, module_sites
 from .jobs import Cancelled, Job, JobRunner, Progress
-from .models import LoadedModel, check_spec, load_model, to_logits
+from .lens import logit_lens
+from .models import (
+    LoadedModel,
+    Vocab,
+    _prepare_hf,
+    check_spec,
+    is_hf,
+    is_lm,
+    load_model,
+    to_logits,
+    vocab_size,
+)
 from .store import PREVIEW, RunStore, safe_name
 from .tensors import input_preview
 
@@ -48,16 +61,24 @@ class RunManager:
         device: str = "cpu",
         max_capture_bytes: int | None = None,
         max_live_models: int = 2,
+        nnsight_params: int = 1_000_000_000,
     ):
         self.store = store
         self.device = device
         self.max_capture_bytes = max_capture_bytes
         self.max_live_models = max_live_models
+        self.nnsight_params = nnsight_params  # auto backend: NNsight above this many parameters
         self._live: OrderedDict[str, Live] = OrderedDict()  # LRU: most recently used last
         self._lock = threading.Lock()  # one capture / attribution at a time (GPU memory)
         self.uploads = store.root / "_uploads"
         self.uploads.mkdir(exist_ok=True)
         self.jobs = JobRunner(describe=lambda e: describe(e)[1])
+
+    @classmethod
+    def from_settings(cls, st: Any) -> RunManager:
+        """A manager configured by ``config.Settings`` (server, CLI, ``neurotome.open``)."""
+        store = RunStore(st.runs_dir)
+        return cls(store, st.device, st.max_capture_bytes, st.max_live_models, st.nnsight_params)
 
     # ---- inputs -----------------------------------------------------------
     def save_upload(self, filename: str, data: bytes) -> str:
@@ -89,8 +110,15 @@ class RunManager:
                 )
             img = Image.open(io.BytesIO(path.read_bytes()))
             return loaded.preprocess(img), {"kind": "image", "name": sample.get("name") or uid}
+        if kind == "text":
+            return _text_input(loaded, sample.get("text") or "")
         shape = sample.get("shape") or loaded.default_input_shape
         g = torch.Generator().manual_seed(int(sample.get("seed", 0)))
+        n = getattr(getattr(loaded.model, "config", None), "vocab_size", 0)
+        n = len(loaded.categories) if isinstance(loaded.categories, Vocab) else n
+        if loaded.tokenizer is not None and n:
+            x = torch.randint(0, n, tuple(shape), generator=g)
+            return x, {"kind": "random", "name": f"random tokens ({shape[-1]})"}
         return torch.randn(*shape, generator=g), {"kind": "random", "name": f"randn{tuple(shape)}"}
 
     # ---- runs -------------------------------------------------------------
@@ -102,17 +130,18 @@ class RunManager:
         modules: list[str] | None = None,
         max_capture_mb: float | None = None,
         progress: Progress | None = None,
+        backend: str | None = None,
     ) -> dict[str, Any]:
         """``progress`` None is the synchronous path (CLI); a capture job passes its progress callback."""
         report = progress or _quiet
         report(0.02, "Load model")
         try:
             loaded = load_model(spec, weights, self.device)
-        except (ImportError, AttributeError, KeyError, TypeError) as e:
+        except (ImportError, AttributeError, KeyError, TypeError, OSError) as e:
             raise ValueError(f"Cannot load model {spec!r}: {type(e).__name__}: {e}") from e
         report(0.08, "Build input")
         x, sample_meta = self.build_input(loaded, sample)
-        return self._create(loaded, x, sample_meta, modules, max_capture_mb, progress)
+        return self._create(loaded, x, sample_meta, modules, max_capture_mb, progress, backend)
 
     def create_from_objects(
         self,
@@ -123,10 +152,17 @@ class RunManager:
         modules: list[str] | None = None,
         max_capture_mb: float | None = None,
         progress: Progress | None = None,
+        tokenizer: Any = None,
+        backend: str | None = None,
     ) -> dict[str, Any]:
-        loaded = LoadedModel(model=model.eval(), spec=None, weights=None, categories=categories)
+        """``tokenizer`` (encode / decode) labels token ids and, for a causal LM, enables the logit lens."""
+        model = _prepare_hf(model) if is_hf(model) else model.eval()
+        v = vocab_size(model) if tokenizer is not None and categories is None else None
+        cats = Vocab(tokenizer, v) if v else categories
+        lm = tokenizer is not None and is_lm(model)
+        loaded = LoadedModel(model, None, None, categories=cats, tokenizer=tokenizer, lm=lm)
         sample_meta = {"kind": "tensor", "name": name or "in-process input"}
-        return self._create(loaded, inputs, sample_meta, modules, max_capture_mb, progress)
+        return self._create(loaded, inputs, sample_meta, modules, max_capture_mb, progress, backend)
 
     def start_capture(
         self,
@@ -135,15 +171,18 @@ class RunManager:
         sample: dict[str, Any],
         modules: list[str] | None = None,
         max_capture_mb: float | None = None,
+        backend: str | None = None,
     ) -> Job:
         """Queue a capture job (its result is the run meta) after the checks that need no model."""
         check_spec(spec)
         uid = Path(sample.get("upload_id") or "").name
         if sample.get("kind") == "upload" and not (uid and (self.uploads / uid).is_file()):
             raise ValueError(f"Upload {sample.get('upload_id')} not found; upload the file again")
-        return self.jobs.submit(
-            "capture", lambda p: self.create_from_spec(spec, weights, sample, modules, max_capture_mb, p)
-        )
+        if sample.get("kind") == "text" and not sample.get("text"):
+            raise ValueError("Text sample needs text")
+        _check_backend(backend)
+        run = lambda p: self.create_from_spec(spec, weights, sample, modules, max_capture_mb, p, backend)  # noqa: E731
+        return self.jobs.submit("capture", run)
 
     def _create(
         self,
@@ -153,17 +192,21 @@ class RunManager:
         modules: list[str] | None = None,
         max_capture_mb: float | None = None,
         progress: Progress | None = None,
+        backend: str | None = None,
     ) -> dict[str, Any]:
         modules = [m.strip() for m in modules or [] if m.strip()] or None
         if max_capture_mb is not None and not (math.isfinite(max_capture_mb) and max_capture_mb > 0):
             raise ValueError(f"max_capture_mb must be a positive finite number, got {max_capture_mb}")
         budget = int(max_capture_mb * 1024 * 1024) if max_capture_mb else self.max_capture_bytes
+        backend = self._pick_backend(loaded.model, backend, progress or _quiet)
+        cap = capture if backend == "torchlens" else _module(backend).capture
+        sample_meta = {**sample_meta, **_token_meta(loaded, inputs)}
         with self._lock:
             run_id = self.store.new_run_id()
             run_dir = self.store.create(run_id)
             try:
                 inputs = _to_device(inputs, self.device)
-                ir = capture(loaded.model, inputs, self.store, run_id, budget, modules, progress)
+                ir = cap(loaded.model, inputs, self.store, run_id, budget, modules, progress)
                 (progress or _quiet)(0.93, "Summarise")
                 cpu = _to_device(inputs, "cpu")
                 torch.save(cpu, run_dir / "inputs.pt")
@@ -177,13 +220,14 @@ class RunManager:
             meta = {
                 "id": run_id,
                 "created": self.store.now(),
-                "model": {"spec": loaded.spec, "weights": loaded.weights, **ir["model"]},
+                "model": {"spec": loaded.spec, "weights": loaded.weights, "backend": backend,
+                          "granularity": "op", **ir["model"], "lm": loaded.lm},  # fmt: skip
                 "sample": sample_meta,
                 "input_shape": _shape(inputs),
                 "output": top,
                 "output_error": output_error,
                 "preview": preview,
-                "categories": loaded.categories,
+                "categories": loaded.categories if isinstance(loaded.categories, list) else None,
                 "reloadable": loaded.spec is not None,
                 "status": "ready",
             }
@@ -191,6 +235,21 @@ class RunManager:
             self.store.write_json(run_id, "meta.json", meta)
             self._keep_live(run_id, Live(loaded, inputs))
             return meta
+
+    def _pick_backend(self, model: torch.nn.Module, backend: str | None, report: Progress) -> str:
+        """The explicit backend, else NNsight for models above ``nnsight_params`` when it is installed."""
+        _check_backend(backend)
+        if backend:
+            return backend
+        n = sum(p.numel() for p in model.parameters())
+        if n > self.nnsight_params and _module("nnsight").available():
+            report(0.09, f"Large model ({n / 1e9:.1f} B params) · NNsight module capture")
+            return "nnsight"
+        return "torchlens"
+
+    def _backend(self, run_id: str) -> Any:
+        """The capture module that recorded this run (op_gradients and patch must match its op ids)."""
+        return _module(self.store.meta(run_id)["model"].get("backend") or "torchlens")
 
     def delete(self, run_id: str) -> None:
         with self._lock:
@@ -235,13 +294,20 @@ class RunManager:
 
     # ---- attribution: every kind below also runs as a job (see job()) -----
     def _cached(self, run_id: str, name: str) -> Any:
-        """The cached result, or None when missing or stale (attribution files before M3 have no merges)."""
+        """The cached result, or None when missing or stale: attribution files before M3 have no merges, and
+        before v0.2 an integer-input run got no ``tokens``."""
         try:
             data = self.store.read_json(run_id, name)
         except KeyError:
             return None
-        stale = name.split("/")[-1].split("_")[0] in METHODS and "merges" not in data
-        return None if stale else data
+        if name.split("/")[-1].split("_")[0] in METHODS:
+            old = "tokens" not in data and data.get("input") is None and self._int_input(run_id)
+            if "merges" not in data or old:
+                return None
+        return data
+
+    def _int_input(self, run_id: str) -> bool:
+        return any(o["is_input"] and "int" in (o.get("dtype") or "") for o in self.store.ir(run_id)["ops"])
 
     @staticmethod
     def _site(ir: dict[str, Any], op: str, why: str) -> tuple[str, int]:
@@ -310,6 +376,8 @@ class RunManager:
                 objective,
                 site,
                 progress,
+                _baseline_id(live.loaded.tokenizer),
+                self._backend(run_id).op_gradients,
             )
         where = {o["id"]: o.get("module") or o["id"] for o in ir["ops"]}
         for u in result["top_units"]:
@@ -419,7 +487,11 @@ class RunManager:
         res = {m: self.attribution(run_id, m, target, steps, objective, part(i, m))
                for i, m in enumerate(METHODS)}  # fmt: skip
         maps = {m: np.asarray(r["input"]["map"]) for m, r in res.items() if r["input"]}
-        block = agreement(maps, METHODS, "|attribution| · 24×24 pooled input map") if len(maps) > 1 else None
+        basis = "|attribution| · 24×24 pooled input map"
+        if not maps:
+            maps = {m: np.asarray(r["tokens"]["scores"]) for m, r in res.items() if r.get("tokens")}
+            basis = "|attribution| · per token"
+        block = agreement(maps, METHODS, basis) if len(maps) > 1 else None
         units, errors = None, []
         if op:
             vecs: dict[str, Any] = {}
@@ -495,7 +567,7 @@ class RunManager:
                 logits = to_logits(model(*args))[0].float()
             t = int(logits.argmax()) if target is None else target
             report(0.3, "Patched replay")
-            out = patch(model, live.inputs, op, replace)
+            out = self._backend(run_id).patch(model, live.inputs, op, replace)
             after = to_logits(out["logits_after"])[0].float()
         cats = live.loaded.categories
         p0, p1 = torch.softmax(logits, 0), torch.softmax(after, 0)
@@ -521,9 +593,25 @@ class RunManager:
         self.store.write_json(run_id, name, result)
         return result
 
+    def lens(self, run_id: str, target: int | None, progress: Progress | None = None) -> dict[str, Any]:
+        """Logit lens (``lens.logit_lens``) of an LM run; ``target`` None = the top prediction."""
+        name = lens_name(target)
+        if (cached := self._cached(run_id, name)) is not None:
+            return cached
+        with self._lock:
+            live = self.live(run_id)
+            if not live.loaded.lm:
+                raise ValueError(NOT_LM)
+            x = _first(live.inputs)
+            if not (_token_ids(x) and x.shape[0] == 1):
+                raise ValueError("Logit lens needs token ids as input")
+            result = logit_lens(live.loaded.model, x, target, live.loaded.tokenizer, progress=progress)
+        self.store.write_json(run_id, name, result)
+        return result
+
     def job(self, run_id: str, req: dict[str, Any]) -> Job:
         """Start one job, or answer it at once from the cache. ValueError for a bad request (HTTP 400)."""
-        self.store.meta(run_id)
+        meta = self.store.meta(run_id)
         kind, target, steps = req.get("kind"), req.get("target"), int(req.get("steps") or 32)
         obj, op, channel = req.get("objective") or None, req.get("op"), req.get("channel")
         if kind == "attribution":
@@ -550,8 +638,15 @@ class RunManager:
             baseline, source = req.get("baseline") or "zeros", req.get("source_run")
             if not op or (baseline == "run" and not source):
                 raise ValueError("patch jobs need op, and source_run when baseline is run")
+            if meta["model"].get("backend") == "nnsight":
+                self._backend(run_id).patch()  # raises its ValueError: no recorded DAG to replay
             name = cache_name(kind, None, target, None, 0, op, baseline=baseline, source_run=source)
             fn = lambda p: self.patch(run_id, op, baseline, source, target, p)  # noqa: E731
+        elif kind == "lens":
+            if not meta["model"].get("lm"):
+                raise ValueError(NOT_LM)
+            name = lens_name(target)
+            fn = lambda p: self.lens(run_id, target, p)  # noqa: E731
         else:
             raise ValueError(f"Unknown job kind {kind!r}")
         if (cached := self._cached(run_id, name)) is not None:
@@ -560,6 +655,59 @@ class RunManager:
 
 
 UNIT_WHY = "unit objectives hook module outputs"
+NOT_LM = "Logit lens needs a causal language model with a tokenizer; this run's model is not one."
+BACKENDS = ("torchlens", "nnsight")
+
+
+def _module(backend: str) -> Any:
+    """The capture module of a backend, imported lazily (only capture.py / capture_nnsight.py trace)."""
+    return importlib.import_module(".capture_nnsight" if backend == "nnsight" else ".capture", __package__)
+
+
+def _check_backend(backend: str | None) -> None:
+    if backend is not None and backend not in BACKENDS:
+        raise ValueError(f"backend must be one of {', '.join(BACKENDS)}, or null for auto")
+    if backend == "nnsight" and not (mod := _module("nnsight")).available():
+        raise ValueError(mod.MISSING)
+
+
+def lens_name(target: int | None) -> str:
+    return f"lens/{'top' if target is None else int(target)}.json"
+
+
+def _baseline_id(tok: Any) -> int:
+    """IG baseline token for token inputs: the pad token, else end-of-sequence, else 0."""
+    for attr in ("pad_token_id", "eos_token_id"):
+        if isinstance(i := getattr(tok, attr, None), int):
+            return i
+    return 0
+
+
+def _token_ids(x: Any) -> bool:
+    """A (B, T) integer tensor."""
+    return torch.is_tensor(x) and x.dim() == 2 and x.dtype in (torch.int64, torch.int32)
+
+
+def _token_meta(loaded: LoadedModel, inputs: Any) -> dict[str, Any]:
+    """``token_ids`` and ``tokens`` (one decode per id) for a (1, T) id input of a model with a tokenizer."""
+    x = _first(inputs)
+    if loaded.tokenizer is None or not _token_ids(x) or x.shape[0] != 1:
+        return {}
+    ids = [int(i) for i in x[0].tolist()]
+    return {"token_ids": ids, "tokens": [loaded.tokenizer.decode([i]) for i in ids]}
+
+
+def _text_input(loaded: LoadedModel, text: str) -> tuple[torch.Tensor, dict[str, Any]]:
+    if loaded.tokenizer is None:
+        raise ValueError("This model has no tokenizer; upload a .npy of token ids or a tensor instead.")
+    ids = list(loaded.tokenizer.encode(text))
+    if not ids:
+        raise ValueError("The text has no tokens")
+    cfg = getattr(loaded.model, "config", None)
+    limit = min(512, getattr(cfg, "n_positions", 0) or getattr(cfg, "max_position_embeddings", 0) or 512)
+    if len(ids) > limit:
+        raise ValueError(f"The text is {len(ids)} tokens; this model takes at most {limit}")
+    return torch.tensor([ids], dtype=torch.int64), {"kind": "text", "name": text[:60], "text": text}
 
 
 def _quiet(_frac: float, _msg: str) -> None:
@@ -608,7 +756,8 @@ def _float_input(live: Live) -> Live:
     if not (torch.is_tensor(x) and x.is_floating_point()):
         raise ValueError(
             "Layer methods interpolate the input from a zero baseline and need a float input; this run's "
-            f"input is {getattr(x, 'dtype', type(x).__name__)}. Embedding-layer methods are planned for v0.2."
+            f"input is {getattr(x, 'dtype', type(x).__name__)}; token inputs get Layer IG on the embeddings "
+            "in the saliency panel instead."
         )
     return live
 
@@ -668,7 +817,7 @@ def _top_k(loaded: LoadedModel, inputs: Any, k: int = 5) -> tuple[list[dict[str,
     return _top_of(logits, loaded.categories, k), None
 
 
-def _top_of(logits: torch.Tensor, cats: list[str] | None, k: int = 5) -> list[dict[str, Any]]:
+def _top_of(logits: torch.Tensor, cats: Sequence[str] | None, k: int = 5) -> list[dict[str, Any]]:
     probs = torch.softmax(logits, dim=0)
     vals, idx = probs.topk(min(k, probs.numel()))
     return [

@@ -32,6 +32,10 @@ export const shape = (s: number[] | null | undefined) => (s && s.length ? s.join
 export const shapeShort = (s: number[] | null | undefined) =>
   s && s.length > 1 && s[0] === 1 ? s.slice(1).join("×") : shape(s);
 
+/** IG completeness Δ = |Σa − (f(x) − f(baseline))| is large when over 10% of |Σa| (≈ |f(x) − f(baseline)|):
+ * too few steps (token IG at 32 steps is often far off). */
+export const deltaLarge = (delta: number | null | undefined, total: number) => delta != null && delta > 0.1 * Math.abs(total);
+
 export function pct(n: number | null | undefined): string {
   return n == null ? "—" : `${Math.round(n * 100)}%`;
 }

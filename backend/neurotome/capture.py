@@ -10,6 +10,7 @@ IR schema (ir.json)::
       "model":  {"class_name", "num_params", "num_ops", "flops", "activation_bytes",
                  "truncated"        (an op was skipped for the budget), "budget_bytes" | null,
                  "capture_modules"  ([addresses] | null), "saved_ops" (non-io ops saved)}  (last 3: M4)
+                 "backend" ("torchlens" | "nnsight"), "granularity" ("op" | "module")  (v0.2, absent before)
       "ops": [{
           "id":        stable id, e.g. "conv2d_3_8" (".p2" suffix for 2nd pass of a recurrent op)
           "type":      "conv2d" | "relu" | "iadd" | "input" | "output" | ...
@@ -71,8 +72,8 @@ def tensor_stats(a: np.ndarray, bins: int = 32) -> dict[str, Any]:
     lo, hi = float(finite.min()), float(finite.max())
     hist, _ = np.histogram(finite.astype(np.float64), bins=bins, range=safe_range(lo, hi))
     return {
-        "mean": float(finite.mean()),
-        "std": float(finite.std()),
+        "mean": float(finite.mean(dtype=np.float64)),
+        "std": float(finite.std(dtype=np.float64)),
         "min": lo,
         "max": hi,
         "zero_frac": float(np.count_nonzero(finite == 0) / finite.size),
@@ -260,6 +261,8 @@ def capture(
             "budget_bytes": max_bytes,
             "capture_modules": list(modules) if modules else None,
             "saved_ops": sum(1 for o in body if o["saved"]),
+            "backend": "torchlens",
+            "granularity": "op",
         },
         "ops": ir_ops,
         "modules": table,

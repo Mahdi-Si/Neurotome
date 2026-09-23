@@ -15,6 +15,8 @@ export interface Stats {
 
 export interface TopK { index: number; prob: number; logit: number; label: string | null }
 
+export type Backend = "torchlens" | "nnsight";
+
 export type Unsaved = "budget" | "modules" | "no_tensor";
 
 export interface RunMeta {
@@ -24,8 +26,9 @@ export interface RunMeta {
     spec: string | null; weights: string | null; class_name: string; num_params: number;
     num_ops: number; flops: number; activation_bytes: number; truncated: boolean;
     budget_bytes?: number | null; capture_modules?: string[] | null; saved_ops?: number; // absent before M4
+    backend?: Backend; granularity?: "op" | "module"; lm?: boolean; // absent before v0.2 = torchlens, op, false
   };
-  sample: { kind: string; name: string };
+  sample: { kind: string; name: string; text?: string; token_ids?: number[]; tokens?: string[] };
   input_shape: number[] | null;
   output: TopK[];
   categories: string[] | null;
@@ -159,7 +162,20 @@ export interface DiffResult {
   } | null;
 }
 
-export type TensorView = ImageTensorView | SequenceTensorView | VectorTensorView;
+export interface AttentionHead {
+  head: number; entropy: number;          // mean over query rows, bits
+  prev: number; first: number; self: number;   // mean weight on q-1 (q ≥ 1), on key 0, on key q
+  pattern: "previous" | "first" | "self" | null;   // the one > 0.5, else null
+}
+export interface AttentionTensorView {
+  kind: "attention"; shape: number[];
+  heads: number; tokens: number; head: number;          // head = selected (the `channel` param, clamped; default 0)
+  maps: { head: number; map: number[][]; max: number }[];  // every head (≤ 64), pooled mean ≤ 64×64, map / max → [0, 1]
+  full: { map: number[][]; max: number };                   // selected head, pooled ≤ 128×128, map / max
+  summary: AttentionHead[];                                  // every head, from the unpooled tensor
+  stats: ViewStats; hist: Hist;                              // stats: whole tensor; hist: selected head
+}
+export type TensorView = ImageTensorView | SequenceTensorView | VectorTensorView | AttentionTensorView;
 
 export type Method = "gxa" | "saliency" | "ig";
 
@@ -179,6 +195,29 @@ export interface Attribution {
   scores: Record<string, number>;
   top_units: { op: string; path?: string; channel: number; value: number }[];
   input_note?: string | null;
+  tokens?: TokenAttribution | null;   // integer (token) inputs, v0.2
+}
+
+export interface TokenAttribution {
+  scores: number[];            // one per input position (sum over the hidden dimension; saliency: L2 norm, unsigned)
+  signed: boolean;             // false for saliency
+  total: number; convergence_delta: number | null;   // Δ for IG only
+  layer: string;               // embedding module address, e.g. "transformer.wte"
+  baseline_id: number | null;  // IG baseline token id, null for gxa / saliency
+  method_label: string;        // e.g. "Layer IG on transformer.wte · baseline token 50256"
+}
+
+export interface LensCell { id: number; token: string; prob: number }
+export interface LensResult {
+  method_label: string;        // "Logit lens · transformer.ln_f + lm_head"
+  layers: string[];            // ["embed", "transformer.h.0", …] (row order, top = embed)
+  pos0: number;                // first position shown (results cover the last ≤ 64 positions)
+  tokens: string[];            // input token per shown position
+  k: number;                   // 5
+  top: LensCell[][][];         // [layer][position][rank 0..k-1]
+  target: { id: number; token: string };
+  target_prob: number[][];     // [layer][position]
+  target_rank: number[][];     // [layer][position], 1 = top
 }
 
 export interface LayerResult {
@@ -207,7 +246,7 @@ export interface PatchResult {
   deltas: Record<string, number>; rel: Record<string, number>;   // keyed by op id (node.output_op)
 }
 
-export type JobKind = "capture" | "attribution" | "layer" | "neuron" | "agreement" | "patch";
+export type JobKind = "capture" | "attribution" | "layer" | "neuron" | "agreement" | "patch" | "lens";
 export type JobStatus = "queued" | "running" | "done" | "error" | "cancelled";
 export interface Job<R = unknown> {
   id: string; kind: JobKind; run_id: string | null; status: JobStatus;
@@ -218,10 +257,15 @@ export type JobRequest =
   | { kind: "layer"; method: LayerMethod; op: string; target: number | null; objective: Objective | null; steps: number }
   | { kind: "neuron"; op: string; channel: number; target: number | null; objective: Objective | null; steps: number }
   | { kind: "agreement"; op: string | null; target: number | null; objective: Objective | null; steps: number }
-  | { kind: "patch"; op: string; baseline: Baseline; source_run: string | null; target: number | null };
+  | { kind: "patch"; op: string; baseline: Baseline; source_run: string | null; target: number | null }
+  | { kind: "lens"; target: number | null };
 
 export interface CreateRun {
   model: string; weights: string | null; sample: Record<string, unknown>;
-  modules: string[] | null; max_capture_mb: number | null;
+  modules: string[] | null; max_capture_mb: number | null; backend: Backend | null;   // null = auto
+}
+export interface ModelsInfo {
+  suggested: string[]; methods: Record<Method, string>; text: string[];
+  backends: { hf: boolean; nnsight: boolean }; nnsight_params: number;
 }
 export interface Health { ok: boolean; device: string; torch: string; cuda: boolean; runs_dir: string; version: string; max_capture_mb: number | null }

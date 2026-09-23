@@ -53,6 +53,15 @@ class Embed(nn.Module):
         return self.fc(self.emb(ids).mean(1))
 
 
+class Pool(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(1, 3)
+
+    def forward(self, ids):
+        return self.fc(ids.float().mean(1, keepdim=True))
+
+
 class Detached(nn.Module):
     def __init__(self):
         super().__init__()
@@ -131,11 +140,16 @@ def test_non_tensor_output(mgr):
 
 def test_integer_input(mgr):
     meta = mgr.create_from_objects(Embed(), torch.randint(0, 10, (1, 5)))
-    res = mgr.attribution(meta["id"], "ig", None, 8)
-    assert res["input"] is None and "needs a float input" in res["input_note"] and res["scores"]
+    res = mgr.attribution(meta["id"], "ig", None, 8)  # token ids: Layer IG on the embedding instead
+    assert res["input"] is None and res["input_note"] is None and res["scores"]
+    assert len(res["tokens"]["scores"]) == 5 and res["tokens"]["layer"] == "emb"
     op = next(o["id"] for o in mgr.store.ir(meta["id"])["ops"] if o["type"] == "linear")
     job = finish(mgr, mgr.job(meta["id"], {"kind": "layer", "method": "layer_ig", "op": op}))
     assert job["status"] == "error" and "need a float input" in job["error"]
+    assert "Layer IG on the embeddings" in job["error"]
+    mean = mgr.create_from_objects(Pool(), torch.randint(0, 10, (1, 5)))  # integer input, no embedding layer
+    res = mgr.attribution(mean["id"], "gxa", None, 8)
+    assert res["tokens"] is None and "no embedding layer" in res["input_note"]
     assert mgr.attribution(mgr.create_from_objects(Small(), torch.randn(1, 4))["id"], "gxa", None, 8)[
         "input_note"] is None  # fmt: skip
 

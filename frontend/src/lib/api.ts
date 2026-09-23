@@ -1,5 +1,6 @@
 import type {
-  Attribution, CreateRun, DiffResult, Fold, GraphView, Health, IndexEntry, Job, JobRequest, Method, ModuleEntry, Objective, RunMeta, SliceResult,
+  Attribution, CreateRun, DiffResult, Fold, GraphView, Health, IndexEntry, Job, JobRequest, Method, ModelsInfo, ModuleEntry, Objective, RunMeta,
+  SliceResult,
   TensorOpts, TensorView,
 } from "./types";
 
@@ -27,7 +28,7 @@ const enc = encodeURIComponent;
 
 export const api = {
   health: () => req<Health>("/api/health"),
-  models: () => req<{ suggested: string[]; methods: Record<Method, string> }>("/api/models"),
+  models: () => req<ModelsInfo>("/api/models"),
   runs: () => req<RunMeta[]>("/api/runs"),
   run: (id: string) => req<RunMeta>(`/api/runs/${enc(id)}`),
   createRun: (body: CreateRun) => req<Job<RunMeta>>("/api/runs", json(body)),   // 202 + capture job

@@ -1,5 +1,6 @@
 // Compare mode: two nodes side by side on a shared scale, plus element-wise Δ = B − A statistics.
 import { api } from "../lib/api";
+import { headReadout } from "../lib/attentionState";
 import { fileName } from "../lib/exportPng";
 import { displayName, num, pct, shapeShort } from "../lib/format";
 import { cellOf, cellPixel, cellSpan, sameShape, sharedRange, unscale } from "../lib/tensorState";
@@ -95,6 +96,15 @@ function Side({ tag, node, t, error, range, onPixel, ex, style }: {
           <HeatCanvas grid={t.heatmap} signed style={{ height: 220, imageRendering: "pixelated" }} label={`${tag} token by feature heatmap`}
             exportName={ex("heatmap")} readout={(r, c, v) => `cell (${r}, ${c}) · ${num(t.scale ? unscale(v, t.scale, "div") : v, 3)}`} />
         </div>
+      )}
+      {t?.kind === "attention" && (
+        <>
+          <span className="lbl dim">Head {t.head} · max {num(t.full.max, 3)}</span>
+          <div style={{ border: "1px solid var(--line)" }}>
+            <HeatCanvas grid={t.full.map} style={{ aspectRatio: "1", imageRendering: "pixelated" }} label={`${tag} head ${t.head} attention`}
+              exportName={ex("attention")} readout={(r, c, v) => headReadout(t, r, c, v, null)} />
+          </div>
+        </>
       )}
       {t?.kind === "vector" && <DivergingBars values={t.values} height={140} xLabel="index" exportName={ex("signal")}
         max={range ? Math.max(Math.abs(range[0]), Math.abs(range[1])) : undefined} />}

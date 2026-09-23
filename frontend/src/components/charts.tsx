@@ -16,12 +16,16 @@ type Cell = [number, number];
 export const pngName = (exportName: string | undefined, label: string) =>
   fileName([(exportName ?? label.toLowerCase()).replace(/\.png$/, "")], "png");
 
+/** Quoted parts ("cat", token text) keep their case inside an uppercase .lbl line. */
+const keepCase = (text: string) =>
+  text.split(/("[^"]*")/).map((p, i) => (i % 2 ? <span key={i} style={{ textTransform: "none" }}>{p}</span> : p));
+
 /** Readout line: hover text on the left, a PNG export button on the right. */
 export function Readout({ text, label, onExport }: { text: string | null; label?: string; onExport?: () => Promise<void> }) {
   return (
     <div className="lbl dim" style={{ display: "flex", gap: 8, height: 14 }}>
       <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-        {text ?? " "}
+        {text == null ? " " : keepCase(text)}
       </span>
       {onExport && (
         <button type="button" className="chart-export" aria-label={`Export ${label ?? "chart"} as PNG`}
@@ -123,9 +127,13 @@ export function DotMatrix({ grid, pitch = 18, signed = false, label = "Dot matri
   );
 }
 
-/** Line plot with a soft area fill, a hover crosshair and an optional accent rule at `mark`. */
-export function LinePlot({ values, height = 96, xLabel = "index", exportName, mark, domain }: {
+/** `"cat"` for point i when labels name it, else "" (readouts: `token 3 "cat" · 12.3`). */
+const named = (labels: string[] | undefined, i: number) => (labels?.[i] != null ? ` "${labels[i]}"` : "");
+
+/** Line plot with a soft area fill, a hover crosshair and an optional accent rule at `mark`; `labels` name the x positions. */
+export function LinePlot({ values, height = 96, xLabel = "index", exportName, mark, domain, labels }: {
   values: number[]; height?: number; xLabel?: string; exportName?: string; mark?: number | null; domain?: [number, number];
+  labels?: string[];
 }) {
   const [hover, setHover] = useState<number | null>(null);
   const ref = useRef<SVGSVGElement>(null);
@@ -154,15 +162,16 @@ export function LinePlot({ values, height = 96, xLabel = "index", exportName, ma
           <line x1={x(hover)} x2={x(hover)} y1="0" y2={height} stroke={INK} strokeWidth="1" vectorEffect="non-scaling-stroke" />
         )}
       </svg>
-      <Readout text={hover != null && values[hover] != null ? `${xLabel} ${hover} · ${num(values[hover], 3)}` : null}
+      <Readout text={hover != null && values[hover] != null ? `${xLabel} ${hover}${named(labels, hover)} · ${num(values[hover], 3)}` : null}
         label="Line plot" onExport={svgExport(ref, exportName, "Line plot")} />
     </div>
   );
 }
 
 /** Diverging bars around a zero rule: ink/accent up, rust down. */
-export function DivergingBars({ values, height = 110, highlight, xLabel = "channel", onPick, exportName, max }: {
+export function DivergingBars({ values, height = 110, highlight, xLabel = "channel", onPick, exportName, max, labels }: {
   values: number[]; height?: number; highlight?: number | null; xLabel?: string; onPick?: (i: number) => void; exportName?: string;
+  labels?: string[];   // names of the bars in the readout (token strings)
   max?: number;   // fixed |value| for full height (shared scale); default: the largest |value|
 }) {
   const [hover, setHover] = useState<number | null>(null);
@@ -186,15 +195,15 @@ export function DivergingBars({ values, height = 110, highlight, xLabel = "chann
         })}
         <line x1="0" x2="100" y1={mid} y2={mid} stroke={INK} vectorEffect="non-scaling-stroke" />
       </svg>
-      <Readout text={hover != null ? `${xLabel} ${hover} · ${num(values[hover], 3)}` : null}
+      <Readout text={hover != null ? `${xLabel} ${hover}${named(labels, hover)} · ${num(values[hover], 3)}` : null}
         label="Values per channel" onExport={svgExport(ref, exportName, "Values per channel")} />
     </div>
   );
 }
 
-/** Scatter of 2D points; color (0..1) drives opacity, top values in accent. */
-export function Scatter({ points, color, height = 180, exportName }: {
-  points: [number, number][]; color: number[]; height?: number; exportName?: string;
+/** Scatter of 2D points; color (0..1) drives opacity, top values in accent; `labels` name the points. */
+export function Scatter({ points, color, height = 180, exportName, labels }: {
+  points: [number, number][]; color: number[]; height?: number; exportName?: string; labels?: string[];
 }) {
   const [hover, setHover] = useState<number | null>(null);
   const ref = useRef<SVGSVGElement>(null);
@@ -214,7 +223,7 @@ export function Scatter({ points, color, height = 180, exportName }: {
             stroke="var(--panel)" strokeWidth={hover === i ? 2 : 0} onMouseEnter={() => setHover(i)} />
         ))}
       </svg>
-      <Readout text={hover != null ? `point ${hover} · (${num(points[hover][0])}, ${num(points[hover][1])}) · value ${num(color[hover])}` : null}
+      <Readout text={hover != null ? `point ${hover}${named(labels, hover)} · (${num(points[hover][0])}, ${num(points[hover][1])}) · value ${num(color[hover])}` : null}
         label="PCA projection" onExport={svgExport(ref, exportName, "PCA projection")} />
     </div>
   );

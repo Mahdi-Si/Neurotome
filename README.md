@@ -22,7 +22,7 @@ Requirements: Python 3.10+, Node 20+, [uv](https://docs.astral.sh/uv/). `make` i
 
 ```powershell
 uv venv .venv
-uv pip install --python .venv\Scripts\python.exe -e "./backend[dev]"
+uv pip install --python .venv\Scripts\python.exe -e "./backend[dev,hf,nnsight]"
 cd frontend; npm ci; cd ..
 .\scripts\dev.ps1                   # API :7070 (reload) + UI :5173; Ctrl+C stops both
 ```
@@ -31,12 +31,16 @@ cd frontend; npm ci; cd ..
 
 ```bash
 uv venv .venv
-uv pip install --python .venv/bin/python -e "./backend[dev]"
+uv pip install --python .venv/bin/python -e "./backend[dev,hf,nnsight]"
 (cd frontend && npm ci)
 ./scripts/dev.sh                    # API :7070 (reload) + UI :5173; Ctrl+C stops both
 ```
 
-Open http://localhost:5173 and press **Capture forward pass** (try the model `py:examples.custom_model:build`).
+Open http://localhost:5173 and press **Capture forward pass** (try the model `py:examples.custom_model:build`, or
+`py:examples.tiny_lm:build` with a `Text` sample).
+
+**Extras.** `hf` (transformers, accelerate) enables `hf:<repo_id>` models and `nnsight` the NNsight capture backend;
+both are optional (`pip install "neurotome[hf,nnsight]"`) and imported only when used.
 
 **GPU / CPU-only PyTorch.** The install above takes the default PyTorch build for your platform. For a specific
 CUDA version or a small CPU-only build, install torch first (e.g.
@@ -45,7 +49,7 @@ CUDA version or a small CPU-only build, install torch first (e.g.
 **With `make`** (Git Bash, MSYS2, Linux, macOS; works with `.venv/Scripts` or `.venv/bin`):
 
 ```bash
-make install        # Python venv + editable backend + npm packages
+make install        # Python venv + editable backend (dev, docs, hf, nnsight extras) + npm packages
 make dev            # API on :7070 and UI on :5173 (hot reload)
 ```
 
@@ -55,12 +59,14 @@ make dev            # API on :7070 and UI on :5173 (hot reload)
 import neurotome
 neurotome.open(model, x)               # captures, then serves the UI at http://127.0.0.1:7070
 neurotome.open(model, x, block=False)  # notebooks: server runs in the background
+neurotome.open(lm, ids, tokenizer=tok) # token labels and, for a causal LM, the logit lens
 ```
 
 ### From the command line
 
 ```bash
 neurotome capture torchvision:resnet18 --weights DEFAULT --image cat.jpg
+neurotome capture hf:gpt2 --weights DEFAULT --text "The cat sat on the"   # a text model (hf extra)
 neurotome capture py:examples.custom_model:build   # your own model (see examples/custom_model.py)
 neurotome capture torchvision:resnet50 --modules layer3,layer4 --max-capture-mb 512   # selective, budgeted
 neurotome serve                                    # serves the built UI + API on :7070
@@ -87,8 +93,9 @@ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.g
   nodes are drawn dotted with `∅`.
 - **Selective**: `Modules` (e.g. `layer3, layer4`) saves tensors only inside those modules; the whole graph is still
   recorded (`Selective` banner).
-- **Errors** are specific and never a traceback: trace failures, outputs with no tensor, integer inputs (input
-  attribution is skipped with a note), missing tensors, models that can no longer be loaded, CUDA out of memory.
+- **Errors** are specific and never a traceback: trace failures, outputs with no tensor, integer inputs without an
+  embedding layer (input attribution is skipped with a note), missing tensors, models that can no longer be loaded,
+  CUDA out of memory.
 - **Theme**: light or dark, following the system until you pick one with the toggle in the top bar.
 
 ## Graph workspace
@@ -136,21 +143,38 @@ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.g
 - Long work (IG, layer methods, agreement, patching) runs as a background job with a progress bar and `Cancel`;
   results are cached in the run folder, so a repeat is instant.
 
+## Sequences and LLMs
+
+- **Models**: `hf:<repo_id>` (e.g. `hf:gpt2`, `hf:Qwen/Qwen2.5-0.5B`, `hf:google/vit-base-patch16-224`, or a local
+  directory) with random or `DEFAULT` weights, loaded in float32 with eager attention; a `py:` module may define a
+  `TOKENIZER` (see `examples/tiny_lm.py`).
+- **Text sample**: `Text` in the form, `--text` on the CLI, or `neurotome.open(model, ids, tokenizer=tok)`; tokens
+  label the tensor, trace and lens views.
+- **Attention**: every softmax `(H, T, T)` opens as per-head maps with a head summary (entropy, previous / first /
+  self-token patterns).
+- **Logit lens** (Lens tab, causal LMs): each layer's residual stream read through the final norm and unembedding,
+  top-5 per position, and a target token's probability and rank across layers.
+- **Token attribution**: IG, gradient × embedding or saliency on the embedding layer, one score per token (IG from a
+  pad-token baseline, with its completeness Δ).
+- **NNsight backend**: `Capture` / `--backend nnsight`, or automatic above `NEUROTOME_NNSIGHT_PARAMS` (1 B)
+  parameters: a module-level graph that stays small for big models (no patching; see
+  [Architecture](docs/ARCHITECTURE.md) for the trade-offs).
+
 ## Layout
 
 ```
 backend/            Python package `neurotome` (FastAPI, TorchLens, Captum)
-  neurotome/        capture.py · graph.py · tensors.py · slicing.py · attribution.py · jobs.py · runs.py · errors.py · api.py · cli.py
+  neurotome/        capture.py · capture_nnsight.py · graph.py · tensors.py · slicing.py · attribution.py · lens.py · jobs.py · runs.py · errors.py · api.py · cli.py
   tests/            end-to-end tests (tiny model + ResNet-18)
 frontend/           Vite + React + TypeScript UI
   e2e/              Playwright specs (home · graph · tensors · trace) and the server global setup
-  src/views/        Home · Graph · Tensors · Trace
+  src/views/        Home · Graph · Tensors · Trace · Lens
   src/components/   GraphCanvas (ELK worker, canvas edges), Minimap, GraphSearch, charts, panels,
                     InputOverlay, ValuesTable, ComparePanel, PatchPanel, JobProgress, AgreementMatrix
   src/lib/          pure logic: layout, viewport, graphState, tensorState, traceState, jobs, exportPng (tested with vitest)
 design/             tokens.json + the canvas mockups that set the visual direction
 docs/               index.md (Getting started) · PLAN.md · ARCHITECTURE.md · DESIGN.md · RELEASE.md · specs/ (mkdocs.yml)
-examples/           quickstart.py · custom_model.py
+examples/           quickstart.py · custom_model.py · tiny_lm.py
 scripts/            dev.sh · dev.ps1 · bench.py · check_wheel.py
 ```
 
@@ -181,11 +205,12 @@ Releasing: [docs/RELEASE.md](docs/RELEASE.md).
 | `NEUROTOME_DEVICE` | `cpu` | e.g. `cuda`, `cuda:1`, `mps` |
 | `NEUROTOME_MAX_CAPTURE_MB` | `2048` | activation budget per run; later ops are recorded without tensors |
 | `NEUROTOME_MAX_LIVE_MODELS` | `2` | models (+ inputs) kept loaded for attribution; least recently used is evicted |
+| `NEUROTOME_NNSIGHT_PARAMS` | `1e9` | auto capture backend: NNsight (module outputs) above this many parameters |
 
 ## Built on
 
-[TorchLens](https://github.com/johnmarktaylor91/torchlens) (capture) · [Captum](https://github.com/meta-pytorch/captum)
-(attribution) · [ELK](https://eclipse.dev/elk/) via elkjs (layout) · FastAPI · React · Geist fonts.
+[TorchLens](https://github.com/johnmarktaylor91/torchlens) (capture) · [NNsight](https://nnsight.net) (module capture) ·
+[Captum](https://github.com/meta-pytorch/captum) (attribution) · Hugging Face Transformers (models) · [ELK](https://eclipse.dev/elk/) via elkjs (layout) · FastAPI · React · Geist fonts.
 
 ## License
 

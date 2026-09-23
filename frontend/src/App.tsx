@@ -4,6 +4,7 @@ import { useRoute } from "./lib/router";
 import { useAsync } from "./lib/useAsync";
 import { GraphViewPage } from "./views/GraphView";
 import { HomeView } from "./views/HomeView";
+import { LensViewPage } from "./views/LensView";
 import { TensorViewPage } from "./views/TensorView";
 import { TraceViewPage } from "./views/TraceView";
 
@@ -23,7 +24,8 @@ export function App() {
       {route.runId && run.data && run.data.id === route.runId && (
         route.tab === "tensors" ? <TensorViewPage key={run.data.id} run={run.data} route={route} />
           : route.tab === "trace" ? <TraceViewPage key={run.data.id} run={run.data} route={route} />
-            : <GraphViewPage key={run.data.id} run={run.data} route={route} />
+            : route.tab === "lens" ? <LensViewPage key={run.data.id} run={run.data} route={route} />
+              : <GraphViewPage key={run.data.id} run={run.data} route={route} />
       )}
     </div>
   );

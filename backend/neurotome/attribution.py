@@ -3,7 +3,8 @@
 The objective is a logit (``target``) or an internal unit: Σ over positions of one channel of a
 module's output.
 
-1. **Input attribution** (Captum): a signed map over the input for the chosen method.
+1. **Input attribution** (Captum): a signed map over a float input for the chosen method, or, for token ids,
+   one score per token from the same method applied to the embedding layer's output.
 2. **Internal attribution**: gradient x activation for *every* op in the graph from one backward pass
    (via TorchLens), plus each parent's grad x input through every merge (edge shares at residual adds, cats).
 3. **Layer methods** (Captum layer IG / conductance, per channel) and a channel's neuron conductance.
@@ -13,11 +14,13 @@ module's output.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from typing import Any, cast
 
 import numpy as np
 import torch
+from torch import nn
 
 from .capture import _out, op_gradients
 from .models import to_logits
@@ -35,7 +38,7 @@ MERGE_METHOD = "Gradient x input at merge inputs"
 Progress = Callable[[float, str], None]
 
 
-def logit_label(target: int, categories: list[str] | None) -> str:
+def logit_label(target: int, categories: Sequence[str] | None) -> str:
     name = categories[target] if categories and target < len(categories) else None
     return f"logit[{target}]" + (f" · {name}" if name else "")
 
@@ -161,9 +164,60 @@ def input_note(x: Any, method: str) -> str | None:
         return "Input attribution needs a tensor input; node scores still cover every op."
     if x.is_floating_point():
         return None
-    return (f"{METHODS.get(method, method)} needs a float input; this input is {x.dtype} (token ids?), so "
-            "input attribution is skipped. Node scores (gradient × activation) still cover every op; "
-            "embedding-layer methods are planned for v0.2.")  # fmt: skip
+    return (f"{METHODS.get(method, method)} needs a float input; this input is {x.dtype} and the model has "
+            "no embedding layer to attribute instead, so input attribution is skipped. Node scores (gradient "
+            "× activation) still cover every op.")  # fmt: skip
+
+
+def embedding_layer(model) -> tuple[str, nn.Module] | None:
+    """(address, module) of the input embeddings: ``get_input_embeddings()``, else the first nn.Embedding."""
+    layer = None
+    with suppress(Exception):
+        layer = model.get_input_embeddings()
+    if not isinstance(layer, nn.Module):
+        layer = next((m for m in model.modules() if isinstance(m, nn.Embedding)), None)
+    return next(((a, m) for a, m in model.named_modules() if m is layer), None) if layer is not None else None
+
+
+def token_attribution(
+    model, x: torch.Tensor, target: int | None, method: str, steps: int, fwd, layer: nn.Module, address: str,
+    baseline_id: int = 0, progress: Progress | None = None,
+) -> dict[str, Any]:  # fmt: skip
+    """One score per token of an integer input: the method applied to the embedding layer's output, summed
+    over the hidden dimension (saliency: the L2 norm of the gradient, unsigned)."""
+    from captum.attr import LayerGradientXActivation, LayerIntegratedGradients
+
+    delta, signed, base = None, True, None
+    if method == "ig":
+        size, n = _batches(steps)
+        attr, d = LayerIntegratedGradients(_reporting(fwd, n, "IG batch", progress), layer).attribute(
+            x,
+            baselines=torch.full_like(x, baseline_id),
+            target=target,
+            n_steps=steps,
+            internal_batch_size=size,
+            return_convergence_delta=True,
+        )
+        scores, delta, base = _out(attr)[0].sum(-1), float(cast(torch.Tensor, d).abs().max()), baseline_id
+        label = f"Layer IG on {address} · baseline token {baseline_id}"
+    elif method == "gxa":
+        scores = _out(LayerGradientXActivation(fwd, layer).attribute(x, target=target))[0].sum(-1)
+        label = f"Gradient x embedding on {address}"
+    elif method == "saliency":
+        grad = LayerGradientXActivation(fwd, layer, multiply_by_inputs=False).attribute(x, target=target)
+        scores, signed, label = _out(grad)[0].norm(dim=-1), False, f"Saliency ‖grad‖ on {address}"
+    else:
+        raise ValueError(f"Unknown method {method!r}; choose one of {sorted(METHODS)}")
+    vals = [float(f"{v:.6g}") for v in scores.detach().float().reshape(-1).cpu().tolist()]
+    return {
+        "scores": vals,
+        "signed": signed,
+        "total": sum(vals),
+        "convergence_delta": delta,
+        "layer": address,
+        "baseline_id": base,
+        "method_label": label,
+    }
 
 
 def attribute(
@@ -172,17 +226,21 @@ def attribute(
     method: str = "ig",
     target: int | None = None,
     steps: int = 32,
-    categories: list[str] | None = None,
+    categories: Sequence[str] | None = None,
     unit_ops: set[str] | None = None,
     objective: dict[str, Any] | None = None,
     site: tuple[str, int] | None = None,
     progress: Progress | None = None,
+    baseline_id: int = 0,
+    grads=op_gradients,
 ) -> dict[str, Any]:
     """``unit_ops``: op ids eligible for the top-units list (default: every op with a channel axis).
     The run manager passes ops that own parameters, so BatchNorm/ReLU copies of the same channel
     do not crowd out distinct units.
     ``objective`` ``{"op", "channel"}`` explains that unit instead of a logit (``target`` is ignored);
     ``site`` is its module call (``graph.module_site``), which the input methods hook.
+    Integer inputs (token ids) get ``tokens`` (the method on the embedding layer, IG from ``baseline_id``)
+    instead of an input map. ``grads`` is the capture backend's ``op_gradients``.
     The result also carries ``channel_scores`` for the run manager, which keeps them server-side."""
     model.eval()
     x = inputs[0] if isinstance(inputs, (tuple, list)) else inputs
@@ -201,14 +259,20 @@ def attribute(
         target = None
 
     report(0.02, "Node gradients")
-    internal = op_gradients(model, inputs, target, to_logits, objective)
+    internal = grads(model, inputs, target, to_logits, objective)
 
-    input_attr, note = None, input_note(x, method)
-    if note is None:
+    input_attr, tokens, note = None, None, input_note(x, method)
+    emb = embedding_layer(model) if note and torch.is_tensor(x) else None
+    if note is None or emb:
         channel = int(objective["channel"]) if objective else None
         fwd, t = objective_forward(model, site if objective else None, channel)
         sub = (lambda f, m: report(0.1 + 0.88 * f, m)) if progress else None
-        input_attr = input_attribution(model, x, target if t is None else t, method, steps, fwd, sub)
+        tgt = target if t is None else t
+        if emb:
+            note = None
+            tokens = token_attribution(model, x, tgt, method, steps, fwd, emb[1], emb[0], baseline_id, sub)
+        else:
+            input_attr = input_attribution(model, x, tgt, method, steps, fwd, sub)
 
     top_units = []
     for op_id, chans in internal["channel_scores"].items():
@@ -239,6 +303,7 @@ def attribute(
         "steps": steps if method == "ig" else None,
         "input": input_attr,
         "input_note": note,
+        "tokens": tokens,
         "scores": internal["scores"],
         "merges": internal["merges"],
         "channel_scores": internal["channel_scores"],

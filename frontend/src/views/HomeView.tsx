@@ -3,12 +3,12 @@ import { IconArrow, IconGraph, IconHome, IconTensor, IconTrace, Logo } from "../
 import { JobProgress } from "../components/JobProgress";
 import { ThemeToggle } from "../components/TopBar";
 import { api } from "../lib/api";
-import { parseBudget, parseModules } from "../lib/capture";
+import { isTextSpec, parseBudget, parseModules } from "../lib/capture";
 import { bytes } from "../lib/format";
 import { followJob } from "../lib/jobs";
 import { href, navigate } from "../lib/router";
 import { errText } from "../lib/tensorState";
-import type { Job, RunMeta } from "../lib/types";
+import type { Backend, Job, RunMeta } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
 
 export function HomeView() {
@@ -20,6 +20,9 @@ export function HomeView() {
   const [model, setModel] = useState("torchvision:resnet18");
   const [weights, setWeights] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
+  const [picked, setPicked] = useState<"text" | "file" | null>(null);   // sticky once the user picks a sample kind
+  const [text, setText] = useState("");
+  const [backend, setBackend] = useState<Backend | "">("");
   const [mods, setMods] = useState("");
   const [budget, setBudget] = useState("");
   const [busy, setBusy] = useState(false);
@@ -29,20 +32,26 @@ export function HomeView() {
   const last = useRef<Job<RunMeta> | null>(null);
   const track = (j: Job<RunMeta> | null) => { last.current = j; setJob(j); };
 
+  const kind = picked ?? (isTextSpec(model, models.data?.text ?? []) ? "text" : "file");
+  const nnsight = models.data?.backends?.nnsight ?? false;
+
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (kind === "text" && !text.trim()) { setError("Type some text, or pick File"); return; }
     const max_capture_mb = parseBudget(budget);
     if (Number.isNaN(max_capture_mb)) { setError("Budget must be a positive number of MB, or empty for the server default"); return; }
     const c = (ctl.current = new AbortController());
     setBusy(true); setError(null); track(null);
     try {
       let sample: Record<string, unknown> = { kind: "random" };
-      if (file) {
+      if (kind === "text") sample = { kind: "text", text };
+      else if (file) {
         const up = await api.upload(file);
         sample = { kind: "upload", upload_id: up.upload_id, name: file.name };
       }
       const meta = await followJob<RunMeta>(
-        () => api.createRun({ model, weights: weights || null, sample, modules: parseModules(mods), max_capture_mb }), track, c.signal);
+        () => api.createRun({ model, weights: weights || null, sample, modules: parseModules(mods), max_capture_mb, backend: backend || null }),
+        track, c.signal);
       navigate(href(meta.id, "graph"));
     } catch (err) {
       const msg = errText(err);
@@ -112,9 +121,34 @@ export function HomeView() {
                 <option value="DEFAULT">Pretrained · DEFAULT</option>
               </select>
             </label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span className="lbl dim">Sample</span>
+                <div className="seg lbl" role="group" aria-label="Sample kind">
+                  {(["text", "file"] as const).map((k) => (
+                    <button key={k} type="button" aria-pressed={kind === k} onClick={() => setPicked(k)}>{k === "text" ? "Text" : "File"}</button>
+                  ))}
+                </div>
+              </div>
+              {kind === "text" ? (
+                <textarea className="field" rows={3} aria-label="Sample text" placeholder="The cat sat on the" value={text}
+                  onChange={(e) => setText(e.target.value)} style={{ height: "auto", padding: "8px 10px", resize: "vertical" }} />
+              ) : (
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span className="lbl dim">image, .npy or .pt · empty = random tensor / random tokens</span>
+                  <input type="file" accept="image/*,.npy,.pt,.pth" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="mono" />
+                </label>
+              )}
+            </div>
             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span className="lbl dim">Sample · image, .npy or .pt (empty = random tensor)</span>
-              <input type="file" accept="image/*,.npy,.pt,.pth" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="mono" />
+              <span className="lbl dim" style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Capture</span>{!backend && models.data?.nnsight_params != null && <span>NNsight above {models.data.nnsight_params / 1e9} B params</span>}
+              </span>
+              <select className="field" aria-label="Capture backend" value={backend} onChange={(e) => setBackend(e.target.value as Backend | "")}>
+                <option value="">Auto</option>
+                <option value="torchlens">TorchLens · every op</option>
+                <option value="nnsight" disabled={!nnsight} title={nnsight ? undefined : "pip install 'neurotome[nnsight]'"}>NNsight · module outputs</option>
+              </select>
             </label>
             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <span className="lbl dim">Modules · comma separated, empty = every op</span>

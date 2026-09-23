@@ -25,7 +25,8 @@ is the product that ties them together behind a good UI.
 | Input attribution (IG, saliency, grad×input) | **Captum** | Used |
 | Hierarchical graph layout | **ELK** (elkjs) | Used |
 | Interventions and patching | TorchLens interventions / **NNsight** | Roadmap (v0.3) |
-| LLM-scale remote execution | NNsight + NDIF | Roadmap (v0.2 / v0.4) |
+| LLM-scale execution | **NNsight** (+ NDIF for remote) | NNsight capture backend used at module level (v0.2); NDIF remote execution still v0.4 |
+| Hugging Face models and tokenizers | **transformers** (optional `hf` extra) | Used (v0.2) |
 
 ## 2. Landscape and positioning
 
@@ -182,11 +183,44 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 
 | Release | Theme | Highlights |
 |---|---|---|
-| v0.2 | Sequences and LLMs | Token input box; Hugging Face models; attention-pattern viewer; logit lens; LayerIntegratedGradients on embeddings; NNsight capture backend for large models |
+| **v0.2 (delivered, spec: docs/specs/v02.md)** | Sequences and LLMs | Token input box; Hugging Face models; attention-pattern viewer; logit lens; LayerIntegratedGradients on embeddings; NNsight capture backend for large models |
 | v0.3 | Interventions | Zero/mean/resample ablation, activation patching and steering from the UI; before/after diff of every downstream node |
 | v0.4 | Scale | Streaming capture to chunked storage (zarr); selective capture during the trace (M4 selects what reaches disk); remote GPU server; optional NDIF backend for very large models |
 | v0.5 | Comparison | Two samples or two checkpoints side by side; dataset-level channel statistics; float vs quantized error overlay |
 | v1.0 | Ecosystem | Jupyter widget; plugin API for custom tensor viewers and attribution methods; static shareable export; circuit-tracer import |
+
+### v0.2 · Sequences and LLMs (delivered)
+
+- [x] **Hugging Face models** (`hf:<repo_id>` or a local directory, `hf` extra): random init or `DEFAULT` weights, the
+  tokenizer or image processor, eager attention and no KV cache; `py:` factories may return a `PreTrainedModel` and
+  define a `TOKENIZER` (`examples/tiny_lm.py`); a causal-LM config without `architectures` loads with its LM head;
+  vocabulary labels only for models with an LM head (classifiers keep `id2label`); `transformers>=4.56`
+- [x] **Token input**: a `Text` sample (Home, `POST /api/runs`, `neurotome capture --text`), random token ids for LMs,
+  `sample.tokens` / `token_ids` in the meta and token labels in the tensor, lens and trace views
+- [x] **Attention-pattern viewer**: softmax outputs `(H, T, T)` open as head tiles, a selected-head map and a head
+  summary (entropy, previous / first / self patterns)
+- [x] **Logit lens** (`lens` job, Lens tab): every block's residual through the final norm and unembedding, top-k and
+  target probability / rank per layer and position
+- [x] **LayerIntegratedGradients on embeddings**: token-id inputs get one score per token (IG, gxa or saliency on the
+  embedding layer) in the Trace view's token strip; method agreement works on the token scores
+- [x] **NNsight capture backend** (`nnsight` extra): module-level capture chosen explicitly or automatically above
+  `NEUROTOME_NNSIGHT_PARAMS` (1 B) parameters
+- [x] v0.2 notes: the IG baseline for tokens is a sequence of **pad tokens** (else end-of-sequence, else id 0), not a
+  zero embedding, and every label names that token id; HF models load in **float32** only (bf16 and `device_map` for
+  models over ~16 GB belong to v0.4); NNsight runs are **module level**: functional ops (residual adds, softmax
+  outside a module) are invisible, merge shares fall back to parent shares, stock GPT-2, Llama and Qwen have no attention views
+  there and patching is refused (400); a **masked LM** (BERT) explains its last position like a causal LM, which is
+  documented, not special-cased
+- [x] v0.2 live smoke (RTX 4080, `--device cuda`, transformers 5.17, first run includes the download):
+  `hf:gpt2` DEFAULT "The cat sat on the" captures 583 ops in 18 s, top-1 ` floor` (0.076), 36 attention views
+  (softmax, cast and dropout per block), lens 0.5 s with the last layer's top-1 equal to the run's; IG token
+  strip Δ = 28.6 at 32 steps, 0.68 at 128, 0.0008 at 512 (the eos baseline needs ≥ 128 steps on GPT-2); the Trace
+  view flags a Δ over 10% of Σ attributions (`Δ large · raise steps`).
+  `hf:Qwen/Qwen2.5-0.5B` DEFAULT "The capital of France is": TorchLens 1657 ops in 27 s (top-1 ` Paris` 0.32, 72
+  attention views, lens 25 layers), NNsight 244 module calls in 3.2 s with the same prediction, lens and token
+  scores, patch refused (400). `hf:google/vit-base-patch16-224` DEFAULT on `grace_hopper.jpg`: 370 ops in 11 s,
+  top-1 `military uniform` 0.89, 36 attention views (12 heads × 197 tokens). `torchvision:resnet18` 3 s,
+  `torchvision:vit_b_16` 3.6 s (SDPA, no attention views)
 
 ## 9. Risks and mitigations
 
@@ -203,7 +237,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 
 1. **Name and license.** Resolved: the name is **Neurotome** and the license is Apache-2.0 (matches TorchLens and Captum).
 2. **Hosted vs local-only.** The MVP is local. A hosted version needs sandboxing and auth; decide after v0.3.
-3. **Second capture backend.** NNsight for LLMs (v0.2) or `torch.export` for static graphs. Recommendation: NNsight, since it serves the LLM roadmap.
+3. **Second capture backend.** Resolved in v0.2: NNsight (module outputs), chosen explicitly or automatically for large models; `torch.export` stays an option for static graphs.
 4. **Dark mode in MVP or later?** The tokens are ready for it; charts need re-validation.
 
 ## 11. Getting started

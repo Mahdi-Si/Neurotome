@@ -116,7 +116,8 @@ progress fill is `Highlight`. Separators remain 1 px borders.
   a 32 px `panel` row with a 1 px `line` bottom border sits under the TopBar of the Graph and Tensor views: a
   `.lbl pill` tag (`Truncated` / `Selective`) and a `.lbl dim` line such as
   `Capture budget 2.0 GB reached · 412/1210 ops saved · ∅ nodes have no tensor`. No colour: it is information,
-  not an error.
+  not an error. An otherwise complete NNsight run gets the `Modules` tag with
+  `NNsight capture · module outputs only · <n> module calls` (its graph nodes are leaf-module calls, not ops).
 - **Node without a tensor**: a 1 px dotted `ink` border (selected, NaN-flag and on-path borders still win; the
   input keeps its dashed border), `∅` before the shape (`∅ 16×28×28`), and `no tensor · <reason>` appended to the
   title and hover readout. Far-zoom canvas nodes stroke with a 1.5 px dash. The inspector reads
@@ -128,6 +129,18 @@ progress fill is `Highlight`. Separators remain 1 px borders.
   `Summarise`) with `Cancel` sits under it. Two optional fields precede the button: `Modules` (comma separated,
   empty = every op) and `Budget · MB` with the server default dim on the right. Recent runs show `saved/total`
   in the Ops column when a capture was partial.
+- **Sample kind**: below `Weights`, the `Sample` label with a segmented control on its right (group `Sample kind`,
+  `Text` / `File`). It defaults to `Text` for a text model (a known text spec, or any `hf:` spec that does not look
+  like a vision model) and follows the Model field until the user picks one by hand; then it stays. `Text` shows a
+  3-row `.field` `<textarea>` (`Sample text`, placeholder `The cat sat on the`; empty → form error
+  `Type some text, or pick File`); `File` shows the file input (empty = random tensor / random tokens).
+- **Capture backend**: a `.field` select under the sample (`Capture backend`): `Auto`, `TorchLens · every op`,
+  `NNsight · module outputs`. With `Auto` the label row carries the dim note `NNsight above 1 B params` on the right;
+  the NNsight option is disabled, with `pip install 'neurotome[nnsight]'` as its title, when the server lacks it.
+- **Lens tab**: the TopBar tabs read `Graph · Tensors · Trace · Lens`. For a run whose model is not a causal LM the
+  Lens tab is a plain `.lbl` span at 0.45 opacity with `aria-disabled="true"` and the title
+  `Logit lens needs a causal language model` (not a link); opening its URL anyway shows that sentence as an `.empty`
+  state with a `← Graph` link.
 - **Error lines**: every `.err` line shows the server's message without the HTTP status; a model whose output
   cannot be explained shows its reason under the Trace parameter strip and disables `Run attribution`; input
   attribution skipped for a non-float input shows the server's note in the saliency panel.
@@ -159,7 +172,7 @@ progress fill is `Highlight`. Separators remain 1 px borders.
   cells let the image through. An `Opacity` range slider (0–100 %, `accent-color: accent`, mono percentage) sets
   the layer's opacity; the `Dots / Over input` segmented control switches it on and is disabled, with a tooltip,
   for runs without a preview.
-- **PNG export**: every chart's readout line carries a `PNG` text button at its right end (`.chart-export`: no
+- **PNG export**: every chart's readout line (except the token strip's, which is text) carries a `PNG` text button at its right end (`.chart-export`: no
   border, `ink-2`, `accent` on hover, the usual focus ring). The export is the chart at 2× (canvases upscaled
   nearest-neighbour to ≥ 480 px) on a `panel` ground; the file is named `run_op_cN_chart.png`.
 - **Agreement matrix**: an n×n SVG grid of 40 px cells with 1 px `line` rules; row and column heads are mono
@@ -168,6 +181,46 @@ progress fill is `Highlight`. Separators remain 1 px borders.
   10.5 px `ink`, 2 decimals, with a `panel` halo) so colour is never the only carrier; the diagonal is `line-soft`
   with `—`. The caption above names the basis and `top-k = k of n`; the hover readout prints every metric
   (`IG × SAL · Jaccard@58 0.41 · overlap 0.58 · Spearman 0.72`).
+- **Token labels**: wherever a tensor's token axis has exactly as many positions as the run's sample tokens, the
+  token names the position. Tokens are shown with visible whitespace (`·` space, `↵` newline, `→` tab, `∅` empty).
+  A single position reads `#3 "cat"`; a pooled cell reads `#64–67 "a·b·c·d"` (the first 4 tokens, `…` beyond).
+  The sequence heatmap readout is `#3 "cat" · feature 4–7 · 0.123`, and for `T ≤ 32` a label column (mono 10.5 px,
+  `ink-2`, right aligned, ellipsis at 10 characters) runs beside the heatmap, one token per row. The per-token norm
+  line plot reads `token 3 "cat" · 12.3`; the PCA scatter names the token (`point 3 "cat" · …`) up to 400 tokens.
+- **Attention map**: a `(1, H, T, T)` tensor whose rows are probability distributions opens as `Attention`; its
+  axis boxes read `B H Q K` with the `H` box hot (`accent` on `accent-soft`), and the left rail's `Head (0–H-1)`
+  field picks the head (the `c` URL param). The main area is a grid of head tiles like the channel grid: a
+  sequential `paper`→`ink` `HeatCanvas` per head, each scaled to its own max, the selected tile with a 2 px `accent`
+  border; under each tile `h3`, the dim mean entropy (`2.41 b`) and the head's pattern word (`prev` / `first` /
+  `self`) in `accent`. The side panel shows `h3` large, `T×T → n×n pooled`, and the selected head's map as a square
+  canvas (`Head 3 attention`) with rows = queries and columns = keys; its readout is
+  `q #5 "cat" → k #4 "the" · 0.412` (the unscaled weight; pooled cells say `mean`) and a click drops the crosshair.
+  For `T ≤ 32` both axes carry token ticks: a label column for queries and a −60° rotated row for keys. The upper
+  triangle of a causal map is simply `paper`. `Value distribution` covers the selected head.
+- **Head summary**: a `<table>` (`Head summary`) under the head grid: `.num` cells, `line-soft` row rules, a 1 px
+  `ink` rule under the `.lbl dim` headers, columns `Head · Entropy (bits) · Prev · First · Self · Pattern` (mean
+  weight on the previous token, on the first token, on itself; the pattern is the one above 0.5). The selected
+  head's row is `accent-soft`; clicking a row selects its head.
+- **Lens grid**: the Lens view's main chart, one SVG (`Logit lens`) so the `PNG` export works like any chart. Rows
+  are the residual stream after the embedding (`embed`) and after each block, top to bottom (a 120 px mono
+  uppercase head column, `transformer.h.3` shown as `h.3`); columns are positions (56 px, the token as the header,
+  the selected position's in `accent`); cells are 56×22 px with 1 px `line-soft` rules. `Top-1` colour: `accent` at
+  alpha = the top-1 probability, the top-1 token (6 characters) printed in the cell. `Target` colour: `accent` at
+  alpha = the target's probability, its rank `#17` printed. Cell text is `ink` below alpha 0.55 and `panel` above,
+  so it never disappears. The selected column gets a 1 px `accent` outline; the grid scrolls sideways inside its
+  card. Readout: `h.3 · pos 5 "cat" → "dog" 0.41 · "the" 0.12 · "a" 0.05 · target "mat" #17 p 0.003`. The
+  parameter strip holds `Target` (the run's top outputs or `top prediction`) and the `Lens colour` segmented
+  control (`Top-1` / `Target`), with the job progress, then the dim method label, on the right; `Run lens` is the
+  TopBar button. The side panel (360 px) names the position, plots the target's probability across layers (line
+  plot, readout `layer 3 "h.2" · 0.410`) with a `layer · #rank · p` list, and lists the top-k tokens of the
+  hovered (or last clicked) cell as rows with an `ink` probability bar. URL: `t` (target id), `mode=target`, `pos`.
+- **Token strip**: token attribution for token inputs (group `Token attribution`), in the Trace view's saliency
+  panel under the big `TOKENS` label with the method label on its right. Tokens are inline mono spans (13 px,
+  2 px 3 px padding, 1 px `line-soft` border, wrapping) whose ground is `accent` (supports) or `negative`
+  (opposes) mixed into transparent at |score| / max; unsigned saliency is always `accent` and the legend reads
+  `Magnitude · unsigned` instead of `Supports / Opposes / Weak`. The hovered token gets a 1 px `ink` border and the
+  readout `#3 "cat" · +0.1234 · 21% of Σ|a|`. **Exception to PNG export**: the strip has no `PNG` button; it is
+  text, so copy it instead.
 - **Values table**: mono `.num` 11 px cells, right-aligned, `line-soft` row rules, headers `.lbl dim` sticky on
   `panel`; negative values and `nan`/`inf` in `negative-text`; at most 320 px high, scrolls both ways, with a
   `key · shape · axes` caption above and a dim truncation note when the slice was cut.

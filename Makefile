@@ -20,7 +20,7 @@ $(PY)$(EXE):
 
 install: $(PY)$(EXE)
 	$(PIP) install -U pip
-	$(PIP) install -e "./backend[dev,docs]"
+	$(PIP) install -e "./backend[dev,docs,hf,nnsight]"
 	cd frontend && npm install
 
 dev:

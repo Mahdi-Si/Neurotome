@@ -17,6 +17,8 @@ class Settings:
     max_capture_bytes: int
     # Models (+ inputs) kept loaded for attribution; least recently used is evicted beyond this.
     max_live_models: int
+    # Auto capture backend: NNsight (module outputs) for models with more parameters than this.
+    nnsight_params: int
 
 
 def get_settings() -> Settings:
@@ -27,4 +29,5 @@ def get_settings() -> Settings:
         device=os.environ.get("NEUROTOME_DEVICE", "cpu"),
         max_capture_bytes=int(float(os.environ.get("NEUROTOME_MAX_CAPTURE_MB", "2048")) * 1024 * 1024),
         max_live_models=int(os.environ.get("NEUROTOME_MAX_LIVE_MODELS", "2")),
+        nnsight_params=int(float(os.environ.get("NEUROTOME_NNSIGHT_PARAMS", "1e9"))),
     )

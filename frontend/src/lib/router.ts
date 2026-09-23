@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 
 // Tiny hash router. Routes:
 //   #/                               home
-//   #/runs/<id>/<tab>?node=<nodeId>  tab = graph | tensors | trace
-export type Tab = "graph" | "tensors" | "trace";
+//   #/runs/<id>/<tab>?node=<nodeId>  tab = graph | tensors | trace | lens
+export type Tab = "graph" | "tensors" | "trace" | "lens";
 
 export interface Route {
   runId: string | null;
@@ -16,7 +16,7 @@ export function parseHash(hash: string): Route {
   const parts = path.split("/").filter(Boolean);
   const params = new URLSearchParams(query);
   if (parts[0] === "runs" && parts[1]) {
-    const tab = (["graph", "tensors", "trace"].includes(parts[2]) ? parts[2] : "graph") as Tab;
+    const tab = (["graph", "tensors", "trace", "lens"].includes(parts[2]) ? parts[2] : "graph") as Tab;
     return { runId: decodeURIComponent(parts[1]), tab, params };
   }
   return { runId: null, tab: "graph", params };
