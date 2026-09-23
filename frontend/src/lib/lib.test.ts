@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { api } from "./api";
 import { compact, shapeShort, signed } from "./format";
 import { href, parseHash } from "./router";
 
@@ -22,5 +23,11 @@ describe("format", () => {
     expect(compact(11_689_512)).toBe("11.7 M");
     expect(shapeShort([1, 64, 56, 56])).toBe("64×56×56");
     expect(signed(-0.0514)).toBe("−0.051");
+  });
+});
+
+describe("api", () => {
+  it("versions the input preview by capture time, so a reused run id never shows a stale image", () => {
+    expect(api.inputPreviewUrl("run_0007", 1700000000.5)).toBe("/api/runs/run_0007/input.png?v=1700000000.5");
   });
 });

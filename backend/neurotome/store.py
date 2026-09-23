@@ -6,6 +6,7 @@ Layout of one run::
       meta.json          run summary (model spec, sample, output top-k, sizes)
       ir.json            the captured graph (see capture.py for the schema)
       inputs.pt          the exact input tensors, so attribution can re-run later
+      input_preview.png  the input as a picture (<= 224 px), only for image-like inputs (absent before M2)
       tensors/<op>.npy   one activation per op, float32, memory-mapped on read
       attribution/*.json cached attribution results
 """
@@ -22,6 +23,7 @@ from typing import Any
 import numpy as np
 
 _SAFE = re.compile(r"[^A-Za-z0-9_.\-]")
+PREVIEW = "input_preview.png"
 
 
 def safe_name(op_id: str) -> str:

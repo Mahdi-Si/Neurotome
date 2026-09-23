@@ -47,6 +47,8 @@ class LoadedModel:
     # Turns a PIL image into a batched input tensor; None when the model does not take images.
     preprocess: Callable[[Any], torch.Tensor] | None = None
     default_input_shape: list[int] = field(default_factory=lambda: [1, 3, 224, 224])
+    # (mean, std) per channel that preprocess normalised with, so the input preview can undo it
+    norm: tuple[tuple[float, ...], tuple[float, ...]] | None = None
 
 
 def _default_image_preprocess(size: int = 224) -> Callable[[Any], torch.Tensor]:
@@ -78,12 +80,15 @@ def _load_torchvision(name: str, weights: str | None, device: str) -> LoadedMode
     w = None
     categories = None
     preprocess = _default_image_preprocess()
+    norm = (IMAGENET_MEAN, IMAGENET_STD)
     if weights:
         enum = torchvision.models.get_model_weights(name)
         w = enum.DEFAULT if weights.upper() == "DEFAULT" else enum[weights]
         categories = list(w.meta.get("categories") or []) or None
         tf = w.transforms()
         preprocess = lambda img: tf(img.convert("RGB")).unsqueeze(0)  # noqa: E731
+        if hasattr(tf, "mean") and hasattr(tf, "std"):
+            norm = (tuple(tf.mean), tuple(tf.std))
     model = torchvision.models.get_model(name, weights=w).eval().to(device)
     return LoadedModel(
         model=model,
@@ -91,6 +96,7 @@ def _load_torchvision(name: str, weights: str | None, device: str) -> LoadedMode
         weights=weights,
         categories=categories,
         preprocess=preprocess,
+        norm=norm,
     )
 
 
@@ -108,8 +114,10 @@ def _load_python(target: str, device: str) -> LoadedModel:
     shape = list(getattr(mod, "INPUT_SHAPE", [1, 3, 224, 224]))
     categories = getattr(mod, "CATEGORIES", None)
     preprocess = getattr(mod, "preprocess", None)
+    norm = None
     if preprocess is None and len(shape) == 4 and shape[1] in (1, 3):
         preprocess = _default_image_preprocess(shape[-1])
+        norm = (IMAGENET_MEAN, IMAGENET_STD)
     return LoadedModel(
         model=model,
         spec=f"py:{target}",
@@ -117,6 +125,7 @@ def _load_python(target: str, device: str) -> LoadedModel:
         categories=list(categories) if categories else None,
         preprocess=preprocess,
         default_input_shape=shape,
+        norm=norm,
     )
 
 

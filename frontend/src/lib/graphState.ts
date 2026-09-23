@@ -24,6 +24,10 @@ export function revealFold(f: Fold, entry: IndexEntry): Fold {
   };
 }
 
+/** The index entry for a module address: its module call first, else any entry with that path. */
+export const moduleEntry = (entries: IndexEntry[], address: string): IndexEntry | null =>
+  entries.find((e) => e.kind === "module" && e.path === address) ?? entries.find((e) => e.path === address) ?? null;
+
 /** Module address of a call or of an "m:"/"g:" id: "m:layer1.0:1" → "layer1.0". */
 export const callAddress = (id: string) => id.replace(/^[mg]:/, "").replace(/:\d+$/, "");
 

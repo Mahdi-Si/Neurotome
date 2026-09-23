@@ -2,8 +2,10 @@ import { useMemo, useState } from "react";
 import { DotMatrix } from "../components/charts";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { Crosshair } from "../components/Icons";
+import { InputOverlay, OverlayControls } from "../components/InputOverlay";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
+import { fileName } from "../lib/exportPng";
 import { displayName, num, pct, signed } from "../lib/format";
 import { href, navigate, type Route } from "../lib/router";
 import type { Attribution, GraphView, Method, RunMeta } from "../lib/types";
@@ -22,6 +24,8 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const [result, setResult] = useState<{ attr: Attribution; view: GraphView } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [overlay, setOverlay] = useState(false);
+  const [alpha, setAlpha] = useState(0.6);
   const selected = route.params.get("node");
 
   const runIt = async (d = depth) => {
@@ -89,9 +93,15 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
             <span className="num" style={{ fontSize: 26, fontWeight: 500, letterSpacing: "-0.03em" }}>SALIENCY</span>
             <span className="lbl">{result?.attr.method_label ?? "—"}</span>
           </div>
+          {result?.attr.input && <OverlayControls run={run} on={overlay} onOn={setOverlay} alpha={alpha} onAlpha={setAlpha} />}
           <div className="rule-top" style={{ paddingTop: 12, borderBottom: "1px solid var(--line)" }}>
             {result?.attr.input
-              ? <DotMatrix grid={result.attr.input.map} pitch={14} signed label="Input attribution" />
+              ? overlay && run.preview
+                ? <InputOverlay run={run} grid={result.attr.input.map} signed alpha={alpha} label="Input attribution over input"
+                    exportName={fileName([run.id, result.attr.method, "overlay"], "png")}
+                    readout={(r, c, v) => `cell (${r}, ${c}) · rel ${num(v, 3)}`} />
+                : <DotMatrix grid={result.attr.input.map} pitch={14} signed label="Input attribution"
+                    exportName={fileName([run.id, result.attr.method, "attr"], "png")} />
               : <div className="empty lbl" style={{ padding: "60px 0", textAlign: "center" }}>{busy ? "Computing…" : "Run attribution to see which inputs drove the target"}</div>}
           </div>
           <div className="lbl dim" style={{ display: "flex", gap: 16 }}>

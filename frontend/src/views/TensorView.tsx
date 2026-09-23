@@ -1,28 +1,47 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import { DivergingBars, DotMatrix, HeatCanvas, Histogram, LinePlot, Scatter } from "../components/charts";
+import { ComparePanel } from "../components/ComparePanel";
 import { Crosshair } from "../components/Icons";
+import { InputOverlay, OverlayControls } from "../components/InputOverlay";
 import { TopBar } from "../components/TopBar";
+import { ValuesTable } from "../components/ValuesTable";
 import { api } from "../lib/api";
+import { exportTiles, fileName } from "../lib/exportPng";
 import { num, shape } from "../lib/format";
 import { href, navigate, type Route } from "../lib/router";
-import type { GraphNode, ImageTensorView, RunMeta, SequenceTensorView, TensorView, VectorTensorView } from "../lib/types";
+import {
+  cellOf, cellPixel, cellSpan, defaultSlice, parentNode, parseTensorParams, tensorParams, unscale, type TensorState,
+} from "../lib/tensorState";
+import type { Cmap, GraphNode, ImageTensorView, Norm, RunMeta, SequenceTensorView, TensorView, VectorTensorView } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
+
+const toInt = (v: string) => (/^\d+$/.test(v) ? Number(v) : null);
+const textBtn = "lbl chart-export";
 
 export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const graph = useAsync(() => api.graph(run.id, 12), [run.id]);
   const nodes = useMemo(() => (graph.data?.nodes ?? []).filter((n) => n.stats), [graph.data]);
-  const nodeParam = route.params.get("node");
+  const s = parseTensorParams(route.params);
   const node: GraphNode | null = useMemo(
-    () => nodes.find((n) => n.id === nodeParam) ?? nodes.find((n) => n.output_op === nodeParam)
+    () => nodes.find((n) => n.id === s.node) ?? nodes.find((n) => n.output_op === s.node)
       ?? nodes.find((n) => n.shape.length === 4 && !n.is_input) ?? nodes[0] ?? null,
-    [nodes, nodeParam]);
-  const chParam = route.params.get("c");
-  const channel = chParam != null ? Number(chParam) : null;
-  const tensor = useAsync(() => (node ? api.tensor(run.id, node.output_op, { channel }) : null), [run.id, node?.output_op, channel]);
-  const t = tensor.data;
+    [nodes, s.node]);
+  const cmp = s.cmp ? nodes.find((n) => n.id === s.cmp) ?? null : null;
+  const tensor = useAsync(
+    () => (node ? api.tensor(run.id, node.output_op, { channel: s.c, py: s.py, px: s.px, norm: s.norm, cmap: s.cmap })
+      .then((v) => [node.output_op, v] as const) : null),
+    [run.id, node?.output_op, s.c, s.py, s.px, s.norm, s.cmap]);
+  // the op travels with its view: while the next node loads, the stale view keeps its own op (the values table fetches by it)
+  const [tOp, t] = tensor.data ?? [null, null];
 
-  const go = (p: Record<string, string | null>) =>
-    navigate(href(run.id, "tensors", { node: node?.id ?? null, c: chParam, ...p }), true);
+  const go = (p: Partial<TensorState>) =>
+    navigate(href(run.id, "tensors", tensorParams({ ...s, node: node?.id ?? null, ...p })), true);
+  const toggleCompare = () => {
+    if (cmp || !node) return go({ cmp: null });
+    const par = graph.data && parentNode(graph.data, node.id);   // only nodes with a saved tensor can be compared
+    go({ cmp: nodes.some((n) => n.id === par) ? par : nodes.find((n) => n.id !== node.id)?.id ?? null });
+  };
+  const pixel = t?.kind === "image" ? t.vector.pixel : null;
 
   return (
     <>
@@ -32,10 +51,24 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><Crosshair /><span className="lbl dim">Tensor · output</span></div>
             <label className="lbl dim" htmlFor="node-pick">Node</label>
-            <select id="node-pick" className="field" value={node?.id ?? ""} onChange={(e) => go({ node: e.target.value, c: null })}>
+            <select id="node-pick" className="field" value={node?.id ?? ""} onChange={(e) => go({ node: e.target.value, c: null, py: null, px: null, cmp: null })}>
               {nodes.map((n) => <option key={n.id} value={n.id}>{n.path} · {n.type}</option>)}
             </select>
             {node && <span className="lbl dim">{node.type} · {node.output_op}</span>}
+            <button type="button" className="btn" aria-pressed={!!cmp} onClick={toggleCompare} disabled={nodes.length < 2}>
+              {cmp ? "Exit compare" : "Compare"}
+            </button>
+            {cmp && node && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <label className="lbl dim" htmlFor="cmp-pick">Compare with</label>
+                  <button type="button" className={textBtn} onClick={() => go({ node: cmp.id, cmp: node.id })}>Swap</button>
+                </div>
+                <select id="cmp-pick" className="field" value={cmp.id} onChange={(e) => go({ cmp: e.target.value })}>
+                  {nodes.map((n) => <option key={n.id} value={n.id}>{n.path} · {n.type}</option>)}
+                </select>
+              </>
+            )}
           </div>
           {t && (
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${t.shape.length}, minmax(0, 1fr))`, border: "1px solid var(--ink)" }}>
@@ -53,11 +86,29 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
             </div>
           )}
           {t?.kind === "image" && (
-            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span className="lbl dim">Channel (0–{t.channels - 1})</span>
-              <input className="field" type="number" min={0} max={t.channels - 1} value={t.channel}
-                onChange={(e) => go({ c: e.target.value })} />
-            </label>
+            <>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span className="lbl dim">Channel (0–{t.channels - 1})</span>
+                <input className="field" type="number" min={0} max={t.channels - 1} value={s.c ?? t.channel}
+                  onChange={(e) => { const c = toInt(e.target.value); if (c != null) go({ c }); }} />
+              </label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span className="lbl dim">Position (y, x)</span>
+                  <button type="button" className={textBtn} onClick={() => go({ py: null, px: null })} title="Jump to the channel's argmax">Peak</button>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <input className="field" type="number" aria-label="Pixel y" min={0} max={t.height - 1} value={s.py ?? t.vector.pixel[0]}
+                    onChange={(e) => { const y = toInt(e.target.value); if (y != null) go({ py: y, px: s.px ?? t.vector.pixel[1] }); }} />
+                  <input className="field" type="number" aria-label="Pixel x" min={0} max={t.width - 1} value={s.px ?? t.vector.pixel[1]}
+                    onChange={(e) => { const x = toInt(e.target.value); if (x != null) go({ py: s.py ?? t.vector.pixel[0], px: x }); }} />
+                </div>
+              </div>
+              <Seg label="Scale" value={s.norm} onPick={(norm) => go({ norm })}
+                options={[["channel", "Per channel"], ["global", "Global"]] as [Norm, string][]} />
+              <Seg label="Colour" value={s.cmap} onPick={(cmap) => go({ cmap })}
+                options={[["seq", "Sequential"], ["div", "Diverging"]] as [Cmap, string][]} />
+            </>
           )}
           {t && (
             <div className="rule-top">
@@ -68,43 +119,101 @@ export function TensorViewPage({ run, route }: { run: RunMeta; route: Route }) {
           )}
           <span className="lbl dim" style={{ marginTop: "auto" }}>Full shape {shape(t?.shape)}</span>
         </aside>
-        {tensor.error && <div className="empty err">{tensor.error}</div>}
-        {!t && !tensor.error && <div className="empty lbl">{tensor.loading ? "Loading tensor…" : "No tensor saved for this node"}</div>}
-        {t && <TensorBody t={t} onChannel={(c) => go({ c: String(c) })} />}
+        {cmp && node ? (
+          <ComparePanel run={run} a={node} b={cmp} channel={s.c ?? (t?.kind === "image" ? t.channel : null)}
+            pixel={s.py != null && s.px != null ? [s.py, s.px] : pixel} norm={s.norm} cmap={s.cmap} onPixel={(py, px) => go({ py, px })} />
+        ) : (
+          <>
+            {tensor.error && <div className="empty err">{tensor.error}</div>}
+            {!t && !tensor.error && <div className="empty lbl">{tensor.loading ? "Loading tensor…" : "No tensor saved for this node"}</div>}
+            {t && tOp && (
+              <TensorBody run={run} op={tOp} t={t} onChannel={(c) => go({ c })} onPixel={(py, px) => go({ py, px })} />
+            )}
+          </>
+        )}
       </div>
     </>
   );
 }
 
-function TensorBody({ t, onChannel }: { t: TensorView; onChannel: (c: number) => void }) {
-  if (t.kind === "image") return <ImageBody t={t} onChannel={onChannel} />;
-  if (t.kind === "sequence") return <SequenceBody t={t} />;
-  return <VectorBody t={t} />;
+function Seg<T extends string>({ label, value, options, onPick }: { label: string; value: T; options: [T, string][]; onPick: (v: T) => void }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span className="lbl dim">{label}</span>
+      <div className="seg lbl" role="group" aria-label={label}>
+        {options.map(([id, text]) => <button key={id} type="button" aria-pressed={id === value} onClick={() => onPick(id)}>{text}</button>)}
+      </div>
+    </div>
+  );
+}
+
+interface BodyProps<V> { run: RunMeta; op: string; t: V; onChannel: (c: number) => void; onPixel: (py: number, px: number) => void }
+
+/** Export name for a chart: run_op_c3_dots (charts append .png). */
+const exName = (run: RunMeta, op: string, c: number | null, chart: string) =>
+  fileName([run.id, op, c == null ? null : "c" + c, chart], "png").slice(0, -4);
+
+function TensorBody(p: BodyProps<TensorView>) {
+  const { t } = p;
+  const values = <ValuesTable key={p.op} runId={p.run.id} op={p.op} shape={t.shape}
+    initial={defaultSlice(t.shape, t.kind === "image" ? { channel: t.channel, pixel: t.vector.pixel } : {})} />;
+  if (t.kind === "image") return <ImageBody {...p} t={t} values={values} />;
+  if (t.kind === "sequence") return <SequenceBody {...p} t={t} values={values} />;
+  return <VectorBody {...p} t={t} values={values} />;
 }
 
 const card: React.CSSProperties = { border: "1px solid var(--line)", background: "var(--panel)", padding: 14, display: "flex", flexDirection: "column", gap: 10, minWidth: 0 };
+const main: React.CSSProperties = { flexGrow: 1, minWidth: 0, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 };
+const side: React.CSSProperties = { width: 420, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 };
 
 function Head({ left, right }: { left: string; right?: string }) {
   return <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><span className="lbl">{left}</span>{right && <span className="lbl dim">{right}</span>}</div>;
 }
 
-function ImageBody({ t, onChannel }: { t: ImageTensorView; onChannel: (c: number) => void }) {
+function ImageBody({ run, op, t, onChannel, onPixel, values }: BodyProps<ImageTensorView> & { values: React.ReactNode }) {
+  const [overlay, setOverlay] = useState(false);
+  const [alpha, setAlpha] = useState(0.6);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const ex = (chart: string) => exName(run, op, t.channel, chart);
+  const signed = t.cmap === "div";
+  const [py, px] = t.vector.pixel;
+  const rows = t.dots.length, cols = t.dots[0]?.length ?? 0;
+  const mark: [number, number] = [cellOf(t.height, rows, py), cellOf(t.width, cols, px)];
+  const pick = (r: number, c: number) => onPixel(cellPixel(t.height, rows, r), cellPixel(t.width, cols, c));
+  const readout = (r: number, c: number, v: number) =>
+    `px (${cellSpan(t.height, rows, r)}, ${cellSpan(t.width, cols, c)}) · ${num(unscale(v, t.dots_range, t.cmap), 3)}`;
+  const exportGrid = () => {
+    const el = gridRef.current;
+    if (!el) return;
+    const n = getComputedStyle(el).gridTemplateColumns.split(" ").filter(Boolean).length;
+    void exportTiles([...el.querySelectorAll("canvas")], Math.max(1, n), ex("grid") + ".png");
+  };
+  const scaleText = t.scale ? `Scale · global ${num(t.scale[0])} … ${num(t.scale[1])}` : "Scale · per channel";
+
   return (
     <>
-      <section className="scroll" style={{ flexGrow: 1, minWidth: 0, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+      <section className="scroll" style={main}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
           <h1 style={{ fontSize: 26 }}>Channels</h1>
-          <span className="lbl dim">Top {t.maps.length} of {t.channels} · sorted by mean · click to inspect</span>
+          <span style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+            <span className="lbl dim">Top {t.maps.length} of {t.channels} · sorted by mean · {t.norm === "global" ? "global" : "per-channel"} scale</span>
+            <button type="button" className={textBtn} onClick={exportGrid} aria-label="Export channel grid as PNG">PNG</button>
+          </span>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: 10 }}>
+        <div ref={gridRef} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: 10 }}>
           {t.maps.map((m) => {
             const on = m.channel === t.channel;
+            const mr = m.map.length, mc = m.map[0]?.length ?? 0;
             return (
-              <button key={m.channel} type="button" onClick={() => onChannel(m.channel)} aria-pressed={on}
+              <button key={m.channel} type="button" onClick={() => { if (!on) onChannel(m.channel); }} aria-pressed={on}
                 aria-label={`Channel ${m.channel}, mean ${num(m.mean)}`}
-                style={{ padding: 0, border: 0, background: "transparent", cursor: "pointer", display: "flex", flexDirection: "column", gap: 4, textAlign: "left" }}>
+                style={{ padding: 0, border: 0, background: "transparent", cursor: on ? "crosshair" : "pointer", display: "flex", flexDirection: "column", gap: 4, textAlign: "left" }}>
                 <span style={{ display: "block", border: on ? "2px solid var(--accent)" : "1px solid var(--line)" }}>
-                  <HeatCanvas grid={m.map} style={{ aspectRatio: "1" }} label={`Channel ${m.channel} map`} />
+                  <HeatCanvas grid={m.map} signed={signed} style={{ aspectRatio: "1" }} label={`Channel ${m.channel} map`}
+                    {...(on ? {
+                      mark: [cellOf(t.height, mr, py), cellOf(t.width, mc, px)] as [number, number],
+                      onPick: (r: number, c: number) => onPixel(cellPixel(t.height, mr, r), cellPixel(t.width, mc, c)),
+                    } : {})} />
                 </span>
                 <span style={{ display: "flex", justifyContent: "space-between" }}>
                   <span className="lbl" style={{ color: on ? "var(--accent)" : undefined }}>c{m.channel}</span>
@@ -116,36 +225,51 @@ function ImageBody({ t, onChannel }: { t: ImageTensorView; onChannel: (c: number
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16 }}>
           <div style={card}>
-            <Head left={`Channel vector @ (${t.vector.pixel.join(", ")})`} right={`1D · ${t.vector.values.length}`} />
-            <DivergingBars values={t.vector.values} highlight={t.channel} onPick={onChannel} />
+            <Head left={`Channel vector @ (${py}, ${px})`} right={`1D · ${t.vector.values.length}`} />
+            <DivergingBars values={t.vector.values} highlight={t.channel} onPick={onChannel} exportName={ex("vector")} />
           </div>
           <div style={card}>
             <Head left={`PCA · ${t.height * t.width} positions`} right={`PC1 ${Math.round(t.pca.explained[0] * 100)}% · PC2 ${Math.round((t.pca.explained[1] ?? 0) * 100)}%`} />
-            <Scatter points={t.pca.points} color={t.pca.color} height={150} />
+            <Scatter points={t.pca.points} color={t.pca.color} height={150} exportName={ex("pca")} />
           </div>
         </div>
+        {values}
       </section>
-      <aside className="panel scroll" style={{ width: 420, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+      <aside className="panel scroll" style={side}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
           <span className="num" style={{ fontSize: 28, fontWeight: 500, letterSpacing: "-0.03em" }}>c{t.channel}</span>
-          <span className="lbl dim">{t.height}×{t.width} → {t.dots.length}×{t.dots[0]?.length ?? 0} pooled</span>
+          <span className="lbl dim">{t.height}×{t.width} → {rows}×{cols} pooled</span>
         </div>
+        <OverlayControls run={run} on={overlay} onOn={setOverlay} alpha={alpha} onAlpha={setAlpha} />
         <div className="rule-top" style={{ paddingTop: 10, borderBottom: "1px solid var(--line)" }}>
-          <DotMatrix grid={t.dots} pitch={Math.min(22, Math.floor(360 / Math.max(1, t.dots[0]?.length ?? 1)))} label={`Channel ${t.channel} dot matrix`} />
+          {overlay ? (
+            <div style={{ width: 360, maxWidth: "100%", margin: "0 auto" }}>
+              <InputOverlay run={run} grid={t.dots} signed={signed} alpha={alpha} label={`Channel ${t.channel} over input`}
+                exportName={ex("overlay")} onPick={pick} mark={mark} readout={readout} />
+            </div>
+          ) : (
+            <DotMatrix grid={t.dots} signed={signed} pitch={Math.min(22, Math.floor(360 / Math.max(1, cols)))} label={`Channel ${t.channel} dot matrix`}
+              exportName={ex("dots")} onPick={pick} mark={mark} readout={readout} />
+          )}
         </div>
-        <div className="lbl dim" style={{ display: "flex", justifyContent: "space-between" }}>
-          <span>○ low</span><span>● high</span><span>Rank {t.channel_rank} / {t.channels}</span>
+        <div className="lbl dim" style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          {signed ? (
+            <span><span style={{ color: "var(--negative)" }}>●</span> neg · ○ 0 · <span style={{ color: "var(--accent)" }}>●</span> pos</span>
+          ) : <span>○ low · ● high</span>}
+          <span>Rank {t.channel_rank} / {t.channels}</span>
         </div>
+        <span className="lbl dim" style={{ marginTop: -10 }}>{scaleText}</span>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <Head left={`Row ${t.profile.row} profile`} right={`1D · ${t.profile.values.length}`} />
-          <LinePlot values={t.profile.values} xLabel="col" />
+          <LinePlot values={t.profile.values} xLabel="col" exportName={ex("profile")} mark={cellOf(t.width, t.profile.values.length, px)} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <Head left="Value distribution" right={`${t.hist.counts.length} bins`} />
-          <Histogram counts={t.hist.counts} range={t.hist.range} height={70} />
+          <Histogram counts={t.hist.counts} range={t.hist.range} height={70} exportName={ex("hist")} />
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
-          {[["Mean", num(t.stats.mean)], ["Std", num(t.stats.std)], ["Peak", `(${t.peak.join(",")})`], ["Max", num(t.stats.max)]].map(([k, v]) => (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+          {[["Mean", num(t.stats.mean)], ["Std", num(t.stats.std)], ["Max", num(t.stats.max)],
+            ["Min", num(t.stats.min)], ["Peak (y,x)", `(${t.peak.join(",")})`], ["Pixel (y,x)", `(${py},${px})`]].map(([k, v]) => (
             <div key={k} style={{ display: "flex", flexDirection: "column", gap: 2 }}><span className="lbl dim">{k}</span><span className="num">{v}</span></div>
           ))}
         </div>
@@ -154,43 +278,48 @@ function ImageBody({ t, onChannel }: { t: ImageTensorView; onChannel: (c: number
   );
 }
 
-function SequenceBody({ t }: { t: SequenceTensorView }) {
+function SequenceBody({ run, op, t, values }: BodyProps<SequenceTensorView> & { values: React.ReactNode }) {
+  const ex = (chart: string) => exName(run, op, null, chart);
   return (
     <>
-      <section className="scroll" style={{ flexGrow: 1, minWidth: 0, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+      <section className="scroll" style={main}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
           <h1 style={{ fontSize: 26 }}>Tokens × features</h1>
           <span className="lbl dim">{t.tokens} tokens · {t.features} features · signed, max-abs scaled</span>
         </div>
         <div style={{ border: "1px solid var(--line)" }}>
-          <HeatCanvas grid={t.heatmap} signed style={{ height: 360, imageRendering: "pixelated" }} label="Token by feature heatmap" />
+          <HeatCanvas grid={t.heatmap} signed style={{ height: 360, imageRendering: "pixelated" }} label="Token by feature heatmap"
+            exportName={ex("heatmap")} readout={(r, c, v) => `cell (${r}, ${c}) · ${num(v, 3)}`} />
         </div>
         <div style={card}>
           <Head left="Per-token norm" right={`1D · ${t.token_norms.length}`} />
-          <LinePlot values={t.token_norms} xLabel="token" />
+          <LinePlot values={t.token_norms} xLabel="token" exportName={ex("norms")} />
         </div>
+        {values}
       </section>
-      <aside className="panel scroll" style={{ width: 420, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+      <aside className="panel scroll" style={side}>
         <Head left={`PCA · ${t.tokens} tokens`} right={`PC1 ${Math.round(t.pca.explained[0] * 100)}%`} />
-        <Scatter points={t.pca.points} color={t.pca.color} />
+        <Scatter points={t.pca.points} color={t.pca.color} exportName={ex("pca")} />
         <Head left="Value distribution" />
-        <Histogram counts={t.hist.counts} range={t.hist.range} height={70} />
+        <Histogram counts={t.hist.counts} range={t.hist.range} height={70} exportName={ex("hist")} />
       </aside>
     </>
   );
 }
 
-function VectorBody({ t }: { t: VectorTensorView }) {
+function VectorBody({ run, op, t, values }: BodyProps<VectorTensorView> & { values: React.ReactNode }) {
+  const ex = (chart: string) => exName(run, op, null, chart);
   return (
     <>
-      <section className="scroll" style={{ flexGrow: 1, minWidth: 0, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+      <section className="scroll" style={main}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
           <h1 style={{ fontSize: 26 }}>Signal</h1>
           <span className="lbl dim">{t.length} values{t.values.length < t.length ? ` · pooled to ${t.values.length}` : ""}</span>
         </div>
-        <div style={card}><DivergingBars values={t.values} height={200} xLabel="index" /></div>
+        <div style={card}><DivergingBars values={t.values} height={200} xLabel="index" exportName={ex("signal")} /></div>
+        {values}
       </section>
-      <aside className="panel scroll" style={{ width: 420, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+      <aside className="panel scroll" style={side}>
         <Head left="Largest |value|" />
         <div className="rule-top">
           {t.top.map((r) => (
@@ -199,7 +328,7 @@ function VectorBody({ t }: { t: VectorTensorView }) {
           ))}
         </div>
         <Head left="Value distribution" />
-        <Histogram counts={t.hist.counts} range={t.hist.range} height={70} />
+        <Histogram counts={t.hist.counts} range={t.hist.range} height={70} exportName={ex("hist")} />
       </aside>
     </>
   );

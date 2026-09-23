@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dtypeShort } from "./format";
-import { callAddress, colorMode, foldParams, nodeTones, parseFold, revealFold, searchIndex, toggleFold, withinGroup } from "./graphState";
+import { callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, revealFold, searchIndex, toggleFold, withinGroup } from "./graphState";
 import type { GraphNode, GraphView, IndexEntry, Stats } from "./types";
 
 const st = (o: Partial<Stats>): Stats =>
@@ -37,6 +37,15 @@ describe("fold state", () => {
   it("reveals a module entry as a folded node, even when it was expanded", () => {
     const m = entry("m:layer1.0:1", { kind: "module", calls: ["layer1:1"] });
     expect(revealFold({ expand: ["layer1.0:1"], collapse: ["layer1:1"] }, m)).toEqual({ expand: ["layer1:1"], collapse: ["layer1.0:1"] });
+  });
+  it("finds the module entry for a tree address, preferring it over an op with the same path", () => {
+    const op = entry("linear_1", { path: "fc" });
+    const m = entry("m:layer1.0:1", { kind: "module", path: "layer1.0", calls: ["layer1:1"] });
+    const fc = entry("m:fc:1", { kind: "module", path: "fc" });
+    expect(moduleEntry([op, m, fc], "fc")).toBe(fc);
+    expect(moduleEntry([op, m], "fc")).toBe(op);
+    expect(moduleEntry([op, m], "nope")).toBeNull();
+    expect(revealFold({ expand: ["layer1.0:1"], collapse: [] }, moduleEntry([op, m], "layer1.0")!).collapse).toContain("layer1.0:1");
   });
   it("resolves addresses and nested groups", () => {
     expect(callAddress("m:layer1.0:1")).toBe("layer1.0");

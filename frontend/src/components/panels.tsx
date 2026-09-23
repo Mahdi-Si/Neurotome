@@ -1,5 +1,6 @@
 // Side panels shared by views: module tree (left) and node inspector (right).
 import { useMemo, useState } from "react";
+import { fileName } from "../lib/exportPng";
 import { compact, displayName, dtypeShort, num, pct, shape, shapeShort } from "../lib/format";
 import { rms } from "../lib/graphState";
 import { href } from "../lib/router";
@@ -93,7 +94,8 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
       {st && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", justifyContent: "space-between" }}><span className="lbl">Activation</span><span className="lbl dim">{shapeShort(node.shape)}</span></div>
-          <Histogram counts={st.hist} range={st.hist_range} highlight={(i) => i === 0 && (st.zero_frac ?? 0) > 0.2} />
+          <Histogram counts={st.hist} range={st.hist_range} highlight={(i) => i === 0 && (st.zero_frac ?? 0) > 0.2}
+            exportName={fileName([runId, node.output_op, "hist"], "png").slice(0, -4)} />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
             {[["Mean", num(st.mean)], ["Std", num(st.std)], ["RMS", num(rms(st))], ["Max", num(st.max)], ["Zero", pct(st.zero_frac)]].map(([k, v]) => (
               <div key={k} style={{ display: "flex", flexDirection: "column", gap: 2 }}><span className="lbl dim">{k}</span><span className="num">{v}</span></div>

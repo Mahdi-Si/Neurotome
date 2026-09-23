@@ -28,6 +28,7 @@ export interface RunMeta {
   categories: string[] | null;
   reloadable: boolean;
   status: string;
+  preview?: { width: number; height: number } | null; // absent on pre-M2 runs
 }
 
 export interface GraphNode {
@@ -88,16 +89,23 @@ export interface Hist { counts: number[]; range: [number, number] }
 export interface Pca { points: [number, number][]; color: number[]; explained: number[] }
 export interface ViewStats { mean: number; std: number; min: number; max: number }
 
+export type Norm = "channel" | "global";
+export type Cmap = "seq" | "div";
+
 export interface ImageTensorView {
   kind: "image";
   shape: number[];
   channels: number; height: number; width: number;
   channel: number;
   channel_rank: number;
-  maps: { channel: number; mean: number; map: number[][] }[];
+  maps: { channel: number; mean: number; map: number[][]; range: [number, number] }[];
+  norm: Norm;
+  cmap: Cmap;
+  scale: [number, number] | null; // global range used, null in per-channel mode
+  dots_range: [number, number];
   dots: number[][];
   stats: ViewStats;
-  peak: [number, number];
+  peak: [number, number]; // argmax of the selected channel; the inspected position is vector.pixel
   profile: { row: number; values: number[] };
   hist: Hist;
   vector: { pixel: [number, number]; values: number[] };
@@ -109,6 +117,7 @@ export interface SequenceTensorView {
   shape: number[];
   tokens: number; features: number;
   heatmap: number[][];
+  scale: [number, number] | null;   // shared [lo, hi] the heatmap was divided by max(|lo|, |hi|) with, else per-tensor max-abs
   token_norms: number[];
   hist: Hist;
   stats: ViewStats;
@@ -123,6 +132,26 @@ export interface VectorTensorView {
   top: { index: number; value: number }[];
   hist: Hist;
   stats: ViewStats;
+}
+
+export interface TensorOpts {
+  channel?: number | null; py?: number | null; px?: number | null;
+  norm?: Norm; cmap?: Cmap; lo?: number | null; hi?: number | null;
+}
+
+export type SliceValue = number | "nan" | "inf" | "-inf";
+export interface SliceResult {
+  op: string; expr: string; key: string;
+  shape: number[]; full_shape: number[]; truncated: boolean;
+  axes: number[]; indices: number[][]; values: SliceValue[];
+}
+
+export interface DiffResult {
+  a: string; b: string; shape_a: number[]; shape_b: number[]; same_shape: boolean;
+  diff: {
+    stats: { mean: number | null; std: number | null; min: number | null; max: number | null };
+    hist: Hist; max_abs: number | null; mean_abs: number | null; cosine: number | null; rel_l2: number | null;
+  } | null;
 }
 
 export type TensorView = ImageTensorView | SequenceTensorView | VectorTensorView;

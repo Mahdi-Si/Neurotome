@@ -70,6 +70,26 @@ The accent and negative pair passes the palette validator: CVD ΔE 30, normal-vi
   change along the edge is shown as `a → b` in `accent`).
 - Histograms use a √count scale (labelled) so long tails stay visible.
 - Baselines are 1 px ink; grids are absent or dotted.
+- **Sequential vs diverging maps**. Sequential (unsigned, scaled to [0, 1]) is a `paper`→`ink` ramp on heatmaps
+  and size plus outline/ink/accent on dot matrices. Diverging (signed, scaled to [-1, 1] with 0 fixed at 0) runs
+  `negative` ↔ `paper` ↔ `accent`, the same look as signed attribution. Use diverging only when the sign means
+  something (pre-activations, attributions, deltas); the view states which scale is on (`Scale · per channel` /
+  `Scale · global lo … hi`). No third colour is added for either.
+- **Crosshair on the inspected pixel**: an `accent` 1 px ring of one cell's diameter on the cell, plus a 1 px
+  horizontal and vertical `accent` line through its centre across the whole chart at 0.5 opacity. Drawn in the
+  chart's SVG, or as 1 px positioned divs over a canvas (a crosshair drawn into a tiny canvas blurs). Line plots
+  of the same row mark the column with a 1 px `accent` vertical rule. A clickable map shows the crosshair cursor.
+- **Input overlay**: a map drawn over the captured input preview (≤ 224 px, `pixelated` below 112 px). The map
+  layer has a transparent ground; each cell is `accent` (v ≥ 0) or `negative` (v < 0) with alpha ∝ |v|, so weak
+  cells let the image through. An `Opacity` range slider (0–100 %, `accent-color: accent`, mono percentage) sets
+  the layer's opacity; the `Dots / Over input` segmented control switches it on and is disabled, with a tooltip,
+  for runs without a preview.
+- **PNG export**: every chart's readout line carries a `PNG` text button at its right end (`.chart-export`: no
+  border, `ink-2`, `accent` on hover, the usual focus ring). The export is the chart at 2× (canvases upscaled
+  nearest-neighbour to ≥ 480 px) on a `panel` ground; the file is named `run_op_cN_chart.png`.
+- **Values table**: mono `.num` 11 px cells, right-aligned, `line-soft` row rules, headers `.lbl dim` sticky on
+  `panel`; negative values and `nan`/`inf` in `negative-text`; at most 320 px high, scrolls both ways, with a
+  `key · shape · axes` caption above and a dim truncation note when the slice was cut.
 
 ## Not yet done
 

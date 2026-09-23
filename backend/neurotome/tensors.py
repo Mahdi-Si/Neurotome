@@ -9,10 +9,16 @@ shape (after dropping the batch axis):
 * ``vector``   (D,)       1D signal and histogram
 
 Higher-rank tensors are folded into ``image`` (leading axes merged into channels).
+Image maps are scaled per channel or on one global range (``norm``), sequentially to
+[0, 1] or diverging to [-1, 1] around 0 (``cmap``). The sequence heatmap is max-abs scaled, or divided by
+max(|lo|, |hi|) when a global ``lo``/``hi`` is given (compare mode's shared scale).
+
+Also here: ``input_preview`` (the run's input as a picture) and ``tensor_diff``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -42,6 +48,22 @@ def pool2d(x: np.ndarray, h: int, w: int) -> np.ndarray:
 def _norm01(x: np.ndarray) -> np.ndarray:
     lo, hi = float(np.min(x)), float(np.max(x))
     return np.zeros_like(x) if hi <= lo else (x - lo) / (hi - lo)
+
+
+def _finite_range(x: np.ndarray) -> list[float]:
+    f = np.asarray(x)[np.isfinite(x)]
+    return [float(f.min()), float(f.max())] if f.size else [0.0, 0.0]
+
+
+def _scale(g: np.ndarray, lo: float, hi: float, cmap: str) -> np.ndarray:
+    """seq: [lo, hi] -> [0, 1]; div: divide by max(|lo|, |hi|) into [-1, 1], so 0 stays 0."""
+    with np.errstate(invalid="ignore"):
+        if cmap == "div":
+            m = max(abs(lo), abs(hi))
+            out = np.clip(g / m, -1, 1) if m > 0 else np.zeros_like(g)
+        else:
+            out = np.clip((g - lo) / (hi - lo), 0, 1) if hi > lo else np.zeros_like(g)
+    return np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=-1.0 if cmap == "div" else 0.0)
 
 
 def _signed(x: np.ndarray) -> np.ndarray:
@@ -97,38 +119,51 @@ def tensor_view(
     max_channels: int = 32,
     map_size: int = 24,
     dot_size: int = 16,
+    norm: str = "channel",
+    cmap: str = "seq",
+    lo: float | None = None,
+    hi: float | None = None,
 ) -> dict[str, Any]:
     a = np.asarray(arr, dtype=np.float32)
     shape = list(a.shape)
     a = _drop_batch(a)
     if a.ndim > 3:
         a = a.reshape(-1, *a.shape[-2:])
+    given = norm == "global" and lo is not None and hi is not None and bool(np.isfinite([lo, hi]).all())
     if a.ndim == 3 and a.shape[1] > 1 and a.shape[2] > 1:
-        return _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size)
+        scale = None
+        if norm == "global":
+            scale = [float(lo), float(hi)] if given else _finite_range(a)
+        return _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scale, cmap) | {
+            "norm": norm,
+            "cmap": cmap,
+            "scale": scale,
+        }
     if a.ndim == 3:
         a = a.reshape(a.shape[0], -1)
     if a.ndim == 2:
-        return _sequence_view(a, shape)
+        return _sequence_view(a, shape, [float(lo), float(hi)] if given else None)
     return _vector_view(a.reshape(-1), shape)
 
 
-def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size) -> dict[str, Any]:
+def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scale, cmap) -> dict[str, Any]:
     C, H, W = a.shape
     means = a.reshape(C, -1).mean(axis=1)
     order = np.argsort(-means)[:max_channels]
     sel = int(channel) if channel is not None and 0 <= int(channel) < C else int(order[0])
 
-    maps = [
-        {"channel": int(c), "mean": float(means[c]), "map": _r(_norm01(pool2d(a[c], map_size, map_size)), 2)}
-        for c in order
-    ]
+    def scaled(g: np.ndarray) -> tuple[np.ndarray, list[float]]:
+        r = scale or _finite_range(g)
+        return _scale(g, *r, cmap), r
+
+    maps = []
+    for c in order:
+        m, r = scaled(pool2d(a[c], map_size, map_size))
+        maps.append({"channel": int(c), "mean": float(means[c]), "map": _r(m, 2), "range": r})
     ch = a[sel]
-    py, px = (
-        np.unravel_index(int(np.argmax(ch)), ch.shape)
-        if pixel is None
-        else (min(max(pixel[0], 0), H - 1), min(max(pixel[1], 0), W - 1))
-    )
-    dots = _norm01(pool2d(ch, dot_size, dot_size))
+    peak = np.unravel_index(int(np.argmax(ch)), ch.shape)
+    py, px = peak if pixel is None else (min(max(pixel[0], 0), H - 1), min(max(pixel[1], 0), W - 1))
+    dots, dots_range = scaled(pool2d(ch, dot_size, dot_size))
     profile = _pool1d(ch[py], 128)
     vec = a[:, py, px]
     idx, coords, ratios = _pca2(a.reshape(C, -1).T)
@@ -143,13 +178,14 @@ def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size) -> d
         "channel_rank": int(np.where(np.argsort(-means) == sel)[0][0]) + 1,
         "maps": maps,
         "dots": _r(dots, 3),
+        "dots_range": dots_range,
         "stats": {
             "mean": float(ch.mean()),
             "std": float(ch.std()),
             "min": float(ch.min()),
             "max": float(ch.max()),
         },
-        "peak": [int(py), int(px)],
+        "peak": [int(peak[0]), int(peak[1])],
         "profile": {"row": int(py), "values": _r(profile)},
         "hist": _hist(ch),
         "vector": {"pixel": [int(py), int(px)], "values": _r(_pool1d(vec, 512))},
@@ -157,9 +193,10 @@ def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size) -> d
     }
 
 
-def _sequence_view(a, shape) -> dict[str, Any]:
+def _sequence_view(a, shape, scale=None) -> dict[str, Any]:
     T, D = a.shape
-    heat = _signed(pool2d(a, 64, 128))
+    pooled = pool2d(a, 64, 128)
+    heat = _signed(pooled) if scale is None else _scale(pooled, *scale, "div")
     norms = np.linalg.norm(a, axis=1)
     idx, coords, ratios = _pca2(a)
     return {
@@ -168,6 +205,7 @@ def _sequence_view(a, shape) -> dict[str, Any]:
         "tokens": T,
         "features": D,
         "heatmap": _r(heat, 3),
+        "scale": scale,
         "token_norms": _r(norms),
         "hist": _hist(a),
         "stats": {
@@ -200,3 +238,56 @@ def _vector_view(a, shape) -> dict[str, Any]:
             "max": float(a.max()),
         },
     }
+
+
+def input_preview(
+    x: np.ndarray, norm: tuple[Sequence[float], Sequence[float]] | None = None
+) -> np.ndarray | None:
+    """Sample 0 of an image batch (N, 1|3, H, W) as uint8 (H, W, 3) or (H, W); None for anything else.
+
+    With ``norm = (mean, std)`` the input is de-normalised (x*std + mean, clipped to [0, 1]); without it
+    each channel is min-max stretched.
+    """
+    x = np.asarray(x)
+    if x.ndim != 4 or x.shape[1] not in (1, 3) or min(x.shape[2:]) < 8:
+        return None
+    img = np.nan_to_num(x[0].astype(np.float64))
+    C = img.shape[0]
+    if norm is not None and len(norm[0]) == C and len(norm[1]) == C:
+        mean, std = (np.asarray(v, dtype=np.float64).reshape(C, 1, 1) for v in norm)
+        img = np.clip(img * std + mean, 0, 1)
+    else:
+        lo, hi = img.min(axis=(1, 2), keepdims=True), img.max(axis=(1, 2), keepdims=True)
+        img = np.where(hi > lo, (img - lo) / np.where(hi > lo, hi - lo, 1), 0)
+    out = np.round(img * 255).astype(np.uint8)
+    return out[0] if C == 1 else out.transpose(1, 2, 0)
+
+
+def _num(v: float) -> float | None:
+    return float(v) if np.isfinite(v) else None
+
+
+def tensor_diff(a: np.ndarray, b: np.ndarray) -> dict[str, Any]:
+    """Statistics of b - a over positions where both are finite; ``diff`` is None when the shapes differ."""
+    out = {"shape_a": list(a.shape), "shape_b": list(b.shape), "same_shape": a.shape == b.shape, "diff": None}
+    if a.shape != b.shape:
+        return out
+    # ponytail: whole-array float64, chunk it if a run's tensors outgrow RAM
+    x, y = np.asarray(a, dtype=np.float64).ravel(), np.asarray(b, dtype=np.float64).ravel()
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    d = y - x
+    n = d.size > 0
+    na, nb, nd = (float(np.linalg.norm(v)) for v in (x, y, d))
+    out["diff"] = {
+        "stats": {
+            k: _num(f(d)) if n else None
+            for k, f in (("mean", np.mean), ("std", np.std), ("min", np.min), ("max", np.max))
+        },
+        "hist": _hist(d),
+        "max_abs": _num(np.abs(d).max()) if n else None,
+        "mean_abs": _num(np.abs(d).mean()) if n else None,
+        "cosine": _num(np.dot(x, y) / (na * nb)) if n and na > 0 and nb > 0 else None,
+        "rel_l2": _num(nd / na) if n and na > 0 else None,
+    }
+    return out

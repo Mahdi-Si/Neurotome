@@ -85,16 +85,31 @@ neurotome serve     # UI and API together on http://127.0.0.1:7070
 - **Hover** an edge for the shape it carries and any dtype/device change; the minimap (bottom left)
   pans on click or drag.
 
+## Tensor inspector
+
+- **Pick a pixel**: click the dot matrix (or the selected channel's tile) to move the inspected position; the channel
+  vector and row profile follow, and a crosshair marks it. `py`/`px` live in the URL; `Peak` jumps back to the argmax.
+- **Scale and colour**: per-channel or global scale (one range for every channel, so they are comparable);
+  sequential or diverging (negative ↔ 0 ↔ positive) colours. Both are URL state (`norm=global`, `cmap=div`).
+- **Over input**: draw the channel map, or in Trace the input attribution, over a ≤224 px preview of the input
+  with an opacity slider. Runs captured before this feature have no preview; re-capture to add one.
+- **Values**: NumPy-style slices (`[0, 12, 20:30, :]`, `[..., 0]`, `::-2`) show raw numbers in a paged table
+  (at most 4096 values); `.npy ↓` downloads the whole slice (up to 2²⁴ values).
+- **Compare**: two nodes side by side (default: the node's parent, e.g. pre vs post ReLU) on a shared scale
+  when shapes match, plus Δ statistics, a Δ histogram, cosine similarity and max |Δ|.
+- **Export**: every chart has a `PNG` button.
+
 ## Layout
 
 ```
 backend/            Python package `neurotome` (FastAPI, TorchLens, Captum)
-  neurotome/        capture.py · graph.py · tensors.py · attribution.py · runs.py · api.py · cli.py
+  neurotome/        capture.py · graph.py · tensors.py · slicing.py · attribution.py · runs.py · api.py · cli.py
   tests/            end-to-end tests (tiny model + ResNet-18)
 frontend/           Vite + React + TypeScript UI
   src/views/        Home · Graph · Tensors · Trace
-  src/components/   GraphCanvas (ELK worker, canvas edges), Minimap, GraphSearch, charts, panels
-  src/lib/          pure logic: layout, viewport, graphState (tested with vitest)
+  src/components/   GraphCanvas (ELK worker, canvas edges), Minimap, GraphSearch, charts, panels,
+                    InputOverlay, ValuesTable, ComparePanel
+  src/lib/          pure logic: layout, viewport, graphState, tensorState, exportPng (tested with vitest)
 design/             tokens.json + the canvas mockups that set the visual direction
 docs/               PLAN.md (MVP + roadmap + steps) · ARCHITECTURE.md · DESIGN.md · screenshots
 examples/           quickstart.py · custom_model.py

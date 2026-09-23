@@ -4,7 +4,7 @@ import { GraphSearch } from "../components/GraphSearch";
 import { Inspector, ModuleTree } from "../components/panels";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
-import { callAddress, colorMode, foldParams, nodeTones, parseFold, revealFold, toggleFold, withinGroup } from "../lib/graphState";
+import { callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, revealFold, toggleFold, withinGroup } from "../lib/graphState";
 import { href, navigate, type Route } from "../lib/router";
 import type { ColorMode, GraphView as GV, IndexEntry, RunMeta } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
@@ -37,6 +37,7 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const fp = foldParams(fold);
   const graph = useAsync(() => api.graph(run.id, depth, attr ? { method: "gxa" } : undefined, fold), [run.id, depth, attr, fp.expand, fp.collapse]);
   const modules = useAsync(() => api.modules(run.id), [run.id]);
+  const index = useAsync(() => api.index(run.id), [run.id]);
   const view = graph.data;
   const [query, setQuery] = useState("");
   const [centre, setCentre] = useState(0);
@@ -71,6 +72,16 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
     go({ ...foldParams(revealFold(fold, e)), node: e.id });
     setCentre((c) => c + 1);
   };
+  // tree pick: a visible node for the module itself, else reveal it like search, else the old heuristic while the index loads
+  const onTreePick = (addr: string) => {
+    if (!view) return;
+    const own = view.nodes.find((n) => n.path === addr);
+    if (own) { go({ node: own.id }); setCentre((c) => c + 1); return; }
+    const e = index.data && moduleEntry(index.data, addr);
+    if (e) return onPick(e);
+    const id = pickNodeForModule(view, addr);
+    if (id) go({ node: id });
+  };
 
   return (
     <>
@@ -93,7 +104,7 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
         <aside style={{ width: 248, flexShrink: 0, borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {modules.data && (
             <ModuleTree modules={modules.data} selectedPath={selected?.path ?? null}
-              onPick={(addr) => { const id = view && pickNodeForModule(view, addr); if (id) go({ node: id }); }} />
+              onPick={onTreePick} />
           )}
         </aside>
         <section style={{ flexGrow: 1, minWidth: 0, position: "relative" }}>
@@ -124,7 +135,7 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
               )}
             </>
           )}
-          <GraphSearch runId={run.id} query={query} onQuery={setQuery} onPick={onPick} />
+          <GraphSearch entries={index.data} error={index.error} query={query} onQuery={setQuery} onPick={onPick} />
           {graph.loading && !view && <div className="empty lbl">Loading graph…</div>}
         </section>
         <aside className="panel" style={{ width: 360, flexShrink: 0, borderLeft: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>

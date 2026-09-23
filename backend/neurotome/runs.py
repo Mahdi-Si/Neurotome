@@ -14,7 +14,8 @@ import torch
 from .attribution import attribute
 from .capture import capture
 from .models import LoadedModel, load_model, to_logits
-from .store import RunStore
+from .store import PREVIEW, RunStore
+from .tensors import input_preview
 
 
 @dataclass
@@ -98,7 +99,9 @@ class RunManager:
             try:
                 inputs = _to_device(inputs, self.device)
                 ir = capture(loaded.model, inputs, self.store, run_id, self.max_capture_bytes)
-                torch.save(_to_device(inputs, "cpu"), run_dir / "inputs.pt")
+                cpu = _to_device(inputs, "cpu")
+                torch.save(cpu, run_dir / "inputs.pt")
+                preview = _save_preview(cpu, loaded.norm if sample_meta["kind"] == "image" else None, run_dir)
                 top = _top_k(loaded, inputs)
             except Exception:
                 self.store.delete(run_id)
@@ -110,6 +113,7 @@ class RunManager:
                 "sample": sample_meta,
                 "input_shape": _shape(inputs),
                 "output": top,
+                "preview": preview,
                 "categories": loaded.categories,
                 "reloadable": loaded.spec is not None,
                 "status": "ready",
@@ -187,6 +191,24 @@ def _to_device(inputs: Any, device: str) -> Any:
     if isinstance(inputs, (tuple, list)):
         return type(inputs)(_to_device(i, device) for i in inputs)
     return inputs
+
+
+def _save_preview(inputs: Any, norm: Any, run_dir: Path) -> dict[str, int] | None:
+    """Write input_preview.png (<= 224 px) for image-like inputs; returns its size or None."""
+    try:  # optional artifact: a failure only disables the overlay, never the capture
+        x = inputs[0] if isinstance(inputs, (tuple, list)) and inputs else inputs
+        img = input_preview(x.detach().float().numpy(), norm) if torch.is_tensor(x) else None
+        if img is None:
+            return None
+        from PIL import Image
+
+        pic = Image.fromarray(img)
+        pic.thumbnail((224, 224))
+        pic.save(run_dir / PREVIEW)
+        return {"width": pic.width, "height": pic.height}
+    except Exception:  # noqa: BLE001 - sparse/quantized inputs, PIL errors
+        (run_dir / PREVIEW).unlink(missing_ok=True)
+        return None
 
 
 def _shape(inputs: Any) -> list[int] | None:

@@ -135,14 +135,15 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 - [x] Hover an edge to see the tensor shape it carries, and dtype/device changes
 - [x] Performance budget: 2k nodes (virtualised DOM nodes, canvas edges, no re-layout on pan/zoom; `lib/perf.test.ts` benchmark)
 
-### M2 · Tensor inspector (≈1.5 weeks)
+### M2 · Tensor inspector (done, spec: `docs/specs/m2.md`)
 
-- [ ] Click a pixel in the dot matrix to update the channel vector and profile row (`py`/`px` already supported by the API)
-- [ ] Global vs per-channel normalization toggle; sequential and diverging colormaps
-- [ ] Input overlay: draw a channel map or attribution over the original image
-- [ ] Raw values table with NumPy-style slice syntax (`[0, 12, 20:30, :]`)
-- [ ] Compare two nodes side by side (before vs after BN, pre vs post ReLU)
-- [ ] Export: PNG of any chart, `.npy` of any slice
+- [x] Click a pixel in the dot matrix (or the selected channel's tile) to set the inspected position; the channel vector and profile row follow, `py`/`px` live in the URL, a crosshair marks the pixel
+- [x] Global vs per-channel normalization toggle (server-side, `norm=`); sequential and diverging colormaps (`cmap=`), both in the URL
+- [x] Input overlay: draw a channel map or the input attribution over `input_preview.png` (written at capture, ≤224 px; old runs disable the toggle)
+- [x] Raw values table with NumPy-style slice syntax (`[0, 12, 20:30, :]`): regex-only parser, 4096-value cap with a truncation note, paged 2-D tables
+- [x] Compare two nodes side by side (default: the node's parent) with a shared scale when shapes match, plus a Δ summary (stats, histogram, cosine, max |Δ|)
+- [x] Export: PNG of any chart (client-side), `.npy` of any slice (capped at 2²⁴ values, 413 beyond)
+- [x] M1 carry-over: picking an open module in the ModuleTree folds and selects the module itself, like search
 
 ### M3 · Attribution and trace (≈2 weeks)
 

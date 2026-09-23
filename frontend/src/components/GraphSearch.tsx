@@ -1,23 +1,20 @@
 // Graph search box: name, type or shape over the run's search index (ops + multi-op module calls).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../lib/api";
 import { shapeShort } from "../lib/format";
 import { searchIndex } from "../lib/graphState";
 import type { IndexEntry } from "../lib/types";
-import { useAsync } from "../lib/useAsync";
 import { IconSearch } from "./Icons";
 
 const typing = (el: Element | null) =>
   !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || (el as HTMLElement).isContentEditable);
 
-export function GraphSearch({ runId, query, onQuery, onPick }: {
-  runId: string; query: string; onQuery: (q: string) => void; onPick: (e: IndexEntry) => void;
+export function GraphSearch({ entries, error, query, onQuery, onPick }: {
+  entries: IndexEntry[] | null; error?: string | null; query: string; onQuery: (q: string) => void; onPick: (e: IndexEntry) => void;
 }) {
-  const index = useAsync(() => api.index(runId), [runId]);
   const input = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
-  const results = useMemo(() => searchIndex(index.data ?? [], query), [index.data, query]);
+  const results = useMemo(() => searchIndex(entries ?? [], query), [entries, query]);
 
   useEffect(() => setActive(0), [query]);
   useEffect(() => {
@@ -65,9 +62,9 @@ export function GraphSearch({ runId, query, onQuery, onPick }: {
       </label>
       {shown && (
         <div id="graph-search-results" role="listbox" className="panel" style={{ border: "1px solid var(--line)", borderTop: 0 }}>
-          {index.error && <div className="lbl err" style={{ padding: "8px 10px" }}>{index.error}</div>}
-          {!index.error && results.length === 0 && (
-            <div className="lbl dim" style={{ padding: "8px 10px" }}>{index.loading ? "Loading index…" : "No matches"}</div>
+          {error && <div className="lbl err" style={{ padding: "8px 10px" }}>{error}</div>}
+          {!error && results.length === 0 && (
+            <div className="lbl dim" style={{ padding: "8px 10px" }}>{entries ? "No matches" : "Loading index…"}</div>
           )}
           {results.map((r, i) => (
             <div key={r.id} id={`gs-${i}`} role="option" aria-selected={i === active}

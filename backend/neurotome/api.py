@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -16,8 +16,9 @@ from .config import get_settings
 from .graph import graph_view, module_tree, search_index
 from .models import SUGGESTED_MODELS
 from .runs import RunManager
-from .store import RunStore
-from .tensors import tensor_view
+from .slicing import SliceError, SliceTooLarge, slice_npy, slice_table
+from .store import PREVIEW, RunStore, safe_name
+from .tensors import tensor_diff, tensor_view
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -67,6 +68,13 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
     def _ir(run_id: str) -> dict[str, Any]:
         _meta(run_id)
         return store.ir(run_id)
+
+    def _tensor(run_id: str, op_id: str):
+        _meta(run_id)
+        try:
+            return store.load_tensor(run_id, op_id)
+        except KeyError as e:
+            raise HTTPException(404, e.args[0] if e.args else str(e)) from e
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -148,15 +156,51 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/ops/{op_id}/tensor")
     def op_tensor(
-        run_id: str, op_id: str, channel: int | None = None, py: int | None = None, px: int | None = None
+        run_id: str,
+        op_id: str,
+        channel: int | None = None,
+        py: int | None = None,
+        px: int | None = None,
+        norm: Literal["channel", "global"] = "channel",
+        cmap: Literal["seq", "div"] = "seq",
+        lo: float | None = None,
+        hi: float | None = None,
     ) -> dict[str, Any]:
-        _meta(run_id)
-        try:
-            arr = store.load_tensor(run_id, op_id)
-        except KeyError as e:
-            raise HTTPException(404, str(e)) from e
+        arr = _tensor(run_id, op_id)
         pixel = (py, px) if py is not None and px is not None else None
-        return tensor_view(arr, channel=channel, pixel=pixel)
+        return tensor_view(arr, channel=channel, pixel=pixel, norm=norm, cmap=cmap, lo=lo, hi=hi)
+
+    @app.get("/api/runs/{run_id}/ops/{op_id}/slice")
+    def op_slice(run_id: str, op_id: str, s: str = "") -> dict[str, Any]:
+        arr = _tensor(run_id, op_id)
+        try:
+            return slice_table(arr, s) | {"op": op_id}
+        except SliceError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.get("/api/runs/{run_id}/ops/{op_id}/slice.npy")
+    def op_slice_npy(run_id: str, op_id: str, s: str = "") -> Response:
+        arr = _tensor(run_id, op_id)
+        try:
+            data = slice_npy(arr, s)
+        except SliceError as e:
+            raise HTTPException(400, str(e)) from e
+        except SliceTooLarge as e:
+            raise HTTPException(413, str(e)) from e
+        headers = {"Content-Disposition": f'attachment; filename="{safe_name(op_id)}.npy"'}
+        return Response(data, media_type="application/octet-stream", headers=headers)
+
+    @app.get("/api/runs/{run_id}/diff")
+    def diff(run_id: str, a: str, b: str) -> dict[str, Any]:
+        return {"a": a, "b": b, **tensor_diff(_tensor(run_id, a), _tensor(run_id, b))}
+
+    @app.get("/api/runs/{run_id}/input.png")
+    def input_png(run_id: str) -> FileResponse:
+        _meta(run_id)
+        path = store.run_dir(run_id) / PREVIEW
+        if not path.is_file():
+            raise HTTPException(404, f"Run {run_id} has no input preview")
+        return FileResponse(path, media_type="image/png")
 
     @app.post("/api/runs/{run_id}/attribution")
     def attribution(run_id: str, req: AttributionRequest) -> dict[str, Any]:
@@ -174,6 +218,9 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         @app.get("/{path:path}", include_in_schema=False)
         def spa(path: str) -> FileResponse:
             f = STATIC_DIR / path
-            return FileResponse(f if path and f.is_file() else STATIC_DIR / "index.html")
+            if path and f.is_file():
+                return FileResponse(f)
+            # revalidate the shell so a rebuilt frontend never points at deleted hashed assets
+            return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app

@@ -26,3 +26,4 @@ runs/
 # Tooling caches
 *.tsbuildinfo
 .playwright-mcp/
+.serena/
