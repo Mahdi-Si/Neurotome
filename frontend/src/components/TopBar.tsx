@@ -18,9 +18,9 @@ export function TopBar({ run, tab, node, children }: {
       height: "var(--topbar-h)", flexShrink: 0, display: "flex", alignItems: "center", gap: 18,
       padding: "0 20px", borderBottom: "1px solid var(--line)",
     }}>
-      <a href="#/" style={{ display: "flex", alignItems: "center", gap: 9 }} aria-label="Dissect home">
+      <a href="#/" style={{ display: "flex", alignItems: "center", gap: 9 }} aria-label="Neurotome home">
         <Logo />
-        <span className="lbl" style={{ fontSize: 12, fontWeight: 500, letterSpacing: ".14em" }}>Dissect</span>
+        <span className="lbl" style={{ fontSize: 12, fontWeight: 500, letterSpacing: ".14em" }}>Neurotome</span>
       </a>
       <span style={{ width: 1, height: 20, background: "var(--line)" }} />
       {run && (

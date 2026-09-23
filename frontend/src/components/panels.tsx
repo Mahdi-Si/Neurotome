@@ -1,6 +1,7 @@
 // Side panels shared by views: module tree (left) and node inspector (right).
 import { useMemo, useState } from "react";
-import { compact, displayName, num, pct, shape, shapeShort } from "../lib/format";
+import { compact, displayName, dtypeShort, num, pct, shape, shapeShort } from "../lib/format";
+import { rms } from "../lib/graphState";
 import { href } from "../lib/router";
 import type { GraphNode, GraphView, ModuleEntry } from "../lib/types";
 import { Histogram } from "./charts";
@@ -49,7 +50,9 @@ export function ModuleTree({ modules, selectedPath, onPick }: {
   );
 }
 
-export function Inspector({ runId, view, node, total }: { runId: string; view: GraphView; node: GraphNode | null; total: number }) {
+export function Inspector({ runId, view, node, total, linkFor = (id) => href(runId, "graph", { node: id }) }: {
+  runId: string; view: GraphView; node: GraphNode | null; total: number; linkFor?: (id: string) => string;
+}) {
   const rel = useMemo(() => {
     if (!node) return { from: [] as GraphNode[], to: [] as GraphNode[], rank: null as number | null };
     const byId = new Map(view.nodes.map((n) => [n.id, n]));
@@ -80,6 +83,8 @@ export function Inspector({ runId, view, node, total }: { runId: string; view: G
           ["Output", shape(node.shape)],
           ["Params", compact(node.num_params)],
           ["FLOPs", compact(node.flops)],
+          ["Dtype", dtypeShort(node.dtype)],
+          ["Device", node.device ?? "—"],
           ["Tensor op", node.output_op],
         ].map(([k, v]) => (
           <div key={k} className="kv"><span className="lbl dim">{k}</span><span className="mono" style={{ textAlign: "right", wordBreak: "break-all" }}>{v}</span></div>
@@ -89,10 +94,16 @@ export function Inspector({ runId, view, node, total }: { runId: string; view: G
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", justifyContent: "space-between" }}><span className="lbl">Activation</span><span className="lbl dim">{shapeShort(node.shape)}</span></div>
           <Histogram counts={st.hist} range={st.hist_range} highlight={(i) => i === 0 && (st.zero_frac ?? 0) > 0.2} />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
-            {[["Mean", num(st.mean)], ["Std", num(st.std)], ["Max", num(st.max)], ["Zero", pct(st.zero_frac)]].map(([k, v]) => (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+            {[["Mean", num(st.mean)], ["Std", num(st.std)], ["RMS", num(rms(st))], ["Max", num(st.max)], ["Zero", pct(st.zero_frac)]].map(([k, v]) => (
               <div key={k} style={{ display: "flex", flexDirection: "column", gap: 2 }}><span className="lbl dim">{k}</span><span className="num">{v}</span></div>
             ))}
+            {st.nan != null && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <span className="lbl dim">NaN / Inf</span>
+                <span className="num" style={{ color: st.nan + (st.inf ?? 0) > 0 ? "var(--negative-text)" : undefined }}>{st.nan} / {st.inf ?? "—"}</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -116,13 +127,13 @@ export function Inspector({ runId, view, node, total }: { runId: string; view: G
             <span className="lbl dim">{k}</span>
             {list.length === 0 && <span className="mono dim">—</span>}
             {list.map((n) => (
-              <a key={n.id} className="mono" href={href(runId, "graph", { node: n.id })} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(n)}</a>
+              <a key={n.id} className="mono" href={linkFor(n.id)} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(n)}</a>
             ))}
           </div>
         ))}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: "auto" }}>
-        <a href={href(runId, "tensors", { node: node.id })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>
+        <a href={href(runId, "tensors", { node: node.output_op })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>
         <a href={href(runId, "trace", { node: node.id })} className="btn lbl" style={{ height: 38 }}>Trace</a>
       </div>
     </div>

@@ -3,10 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DISSECT=".venv/bin/dissect"
-[ -x "$DISSECT" ] || DISSECT="dissect"
+NEUROTOME=".venv/bin/neurotome"
+[ -x "$NEUROTOME" ] || NEUROTOME=".venv/Scripts/neurotome.exe"
+[ -x "$NEUROTOME" ] || NEUROTOME="neurotome"
 
-"$DISSECT" serve --reload &
+"$NEUROTOME" serve --reload &
 API_PID=$!
 trap 'kill $API_PID 2>/dev/null || true' EXIT INT TERM
 

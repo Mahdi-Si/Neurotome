@@ -1,4 +1,4 @@
-"""Capture: run one forward pass through TorchLens and turn it into Dissect's IR.
+"""Capture: run one forward pass through TorchLens and turn it into Neurotome's IR.
 
 This module is the ONLY place that talks to TorchLens. Everything downstream
 (graph views, tensor views, the API, the frontend) reads the IR below, so a
@@ -14,11 +14,13 @@ IR schema (ir.json)::
           "func":      torch function name
           "shape":     [1, 64, 56, 56]
           "dtype":     "torch.float32"
+          "device":    "cpu" | "cuda:0" | null  (device of the first output tensor; absent before M1)
           "parents":   [op ids]    "children": [op ids]
           "modules":   ["layer1:1", "layer1.0:1", "layer1.0.conv2:1"]  module-call stack, outermost first
           "module":    "layer1.0.conv2" or null (the leaf module that produced it)
           "num_params", "flops", "is_input", "is_output", "saved"
-          "stats":     {"mean","std","min","max","zero_frac","hist":[32 ints],"hist_range":[lo,hi],"numel"}
+          "stats":     {"mean","std","min","max","zero_frac","hist":[32 ints],"hist_range":[lo,hi],"numel",
+                        "nan","inf"}  moments/hist over finite values; nan/inf counts absent before M1
       }],
       "modules": {"layer1.0": {"class_name", "num_params", "depth"}, ...}
     }
@@ -47,6 +49,7 @@ def _safe(fn, default=None):
 def tensor_stats(a: np.ndarray, bins: int = 32) -> dict[str, Any]:
     flat = np.asarray(a, dtype=np.float32).ravel()
     finite = flat[np.isfinite(flat)]
+    counts = {"nan": int(np.isnan(flat).sum()), "inf": int(np.isinf(flat).sum())}
     if finite.size == 0:
         return {
             "mean": None,
@@ -57,6 +60,7 @@ def tensor_stats(a: np.ndarray, bins: int = 32) -> dict[str, Any]:
             "hist": [0] * bins,
             "hist_range": [0.0, 1.0],
             "numel": int(flat.size),
+            **counts,
         }
     lo, hi = float(finite.min()), float(finite.max())
     hist, _ = np.histogram(finite.astype(np.float64), bins=bins, range=safe_range(lo, hi))
@@ -69,6 +73,7 @@ def tensor_stats(a: np.ndarray, bins: int = 32) -> dict[str, Any]:
         "hist": hist.astype(int).tolist(),
         "hist_range": [lo, hi],
         "numel": int(flat.size),
+        **counts,
     }
 
 
@@ -148,6 +153,7 @@ def capture(
                 "func": _safe(lambda op=op: str(op.func_name), None),
                 "shape": [int(s) for s in shape],
                 "dtype": str(_safe(lambda op=op: op.dtype, "")),
+                "device": str(out.device) if out is not None else None,
                 "parents": [
                     by_label[p] for p in (_safe(lambda op=op: op.parents, []) or []) if p in by_label
                 ],

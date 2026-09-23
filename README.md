@@ -1,4 +1,4 @@
-# Dissect
+# Neurotome
 
 **Open the model. See every signal.** A local web workbench for dissecting one PyTorch model on one
 input. It captures every op of a forward pass, lets you browse the computation graph, and opens any
@@ -29,45 +29,72 @@ Without `make`:
 python -m venv .venv && source .venv/bin/activate
 pip install -e "./backend[dev]"
 cd frontend && npm install && cd ..
-dissect serve --reload &            # API :7070
+neurotome serve --reload &          # API :7070
 cd frontend && npm run dev          # UI  :5173
 ```
 
 **GPU / CPU-only PyTorch.** `pip` installs the default PyTorch build for your platform. For a specific
 CUDA version or a small CPU-only build, install torch first by following https://pytorch.org, then run `make install`.
 
+### Windows
+
+`make` is optional; with [uv](https://docs.astral.sh/uv/) and PowerShell:
+
+```powershell
+uv venv .venv
+uv pip install --python .venv\Scripts\python.exe -e "./backend[dev]"
+cd frontend; npm ci; cd ..
+.\scripts\dev.ps1                   # API :7070 (reload) + UI :5173; Ctrl+C stops both
+```
+
+The Makefile also works with a Windows venv (`.venv/Scripts`) if you have `make` from Git Bash or MSYS2.
+
 ### From Python or a notebook
 
 ```python
-import dissect
-dissect.open(model, x)            # captures, then serves the UI at http://127.0.0.1:7070
-dissect.open(model, x, block=False)  # notebooks: server runs in the background
+import neurotome
+neurotome.open(model, x)               # captures, then serves the UI at http://127.0.0.1:7070
+neurotome.open(model, x, block=False)  # notebooks: server runs in the background
 ```
 
 ### From the command line
 
 ```bash
-dissect capture torchvision:resnet18 --weights DEFAULT --image cat.jpg
-dissect capture py:examples.custom_model:build     # your own model (see examples/custom_model.py)
-dissect serve                                      # serves the built UI + API on :7070
+neurotome capture torchvision:resnet18 --weights DEFAULT --image cat.jpg
+neurotome capture py:examples.custom_model:build   # your own model (see examples/custom_model.py)
+neurotome serve                                    # serves the built UI + API on :7070
 ```
 
 ### Single-process build
 
 ```bash
-make build          # builds the UI into backend/dissect/static
-dissect serve       # UI and API together on http://127.0.0.1:7070
+make build          # builds the UI into backend/neurotome/static
+neurotome serve     # UI and API together on http://127.0.0.1:7070
 ```
+
+## Graph workspace
+
+- **Fold per module**: `+` on a module node expands it, `−` on a group box collapses it; the depth
+  buttons reset these overrides. The fold lives in the URL (`#/runs/<id>/graph?depth=1&expand=layer1.0:1&collapse=…`),
+  so a link reopens the same view.
+- **Search** (`/` or Ctrl/Cmd+K): name, op type or shape (`64x56x56`). Picking a hit that is folded
+  inside a collapsed module opens its ancestors, selects it and centres it.
+- **Keyboard** (click or Tab into the canvas): ↓ child, ↑ parent, ←/→ siblings, `Enter` opens the
+  tensor, `Escape` clears the search, `+`/`-` expand/collapse the selection.
+- **Colour**: Plain · Attr (grad × act) · Norm (RMS) · Sparsity (zero %) · NaN/Inf flag, with a legend.
+- **Hover** an edge for the shape it carries and any dtype/device change; the minimap (bottom left)
+  pans on click or drag.
 
 ## Layout
 
 ```
-backend/            Python package `dissect` (FastAPI, TorchLens, Captum)
-  dissect/          capture.py · graph.py · tensors.py · attribution.py · runs.py · api.py · cli.py
+backend/            Python package `neurotome` (FastAPI, TorchLens, Captum)
+  neurotome/        capture.py · graph.py · tensors.py · attribution.py · runs.py · api.py · cli.py
   tests/            end-to-end tests (tiny model + ResNet-18)
 frontend/           Vite + React + TypeScript UI
   src/views/        Home · Graph · Tensors · Trace
-  src/components/   GraphCanvas (ELK), charts, panels
+  src/components/   GraphCanvas (ELK worker, canvas edges), Minimap, GraphSearch, charts, panels
+  src/lib/          pure logic: layout, viewport, graphState (tested with vitest)
 design/             tokens.json + the canvas mockups that set the visual direction
 docs/               PLAN.md (MVP + roadmap + steps) · ARCHITECTURE.md · DESIGN.md · screenshots
 examples/           quickstart.py · custom_model.py
@@ -86,12 +113,17 @@ examples/           quickstart.py · custom_model.py
 
 | Env var | Default | |
 |---|---|---|
-| `DISSECT_RUNS_DIR` | `./runs` | where runs are stored |
-| `DISSECT_HOST` / `DISSECT_PORT` | `127.0.0.1` / `7070` | keep localhost: `py:` model specs import and run code |
-| `DISSECT_DEVICE` | `cpu` | e.g. `cuda`, `cuda:1`, `mps` |
-| `DISSECT_MAX_CAPTURE_MB` | `2048` | activation budget per run; later ops are recorded without tensors |
+| `NEUROTOME_RUNS_DIR` | `./runs` | where runs are stored |
+| `NEUROTOME_HOST` / `NEUROTOME_PORT` | `127.0.0.1` / `7070` | keep localhost: `py:` model specs import and run code |
+| `NEUROTOME_DEVICE` | `cpu` | e.g. `cuda`, `cuda:1`, `mps` |
+| `NEUROTOME_MAX_CAPTURE_MB` | `2048` | activation budget per run; later ops are recorded without tensors |
+| `NEUROTOME_MAX_LIVE_MODELS` | `2` | models (+ inputs) kept loaded for attribution; least recently used is evicted |
 
 ## Built on
 
 [TorchLens](https://github.com/johnmarktaylor91/torchlens) (capture) · [Captum](https://github.com/meta-pytorch/captum)
 (attribution) · [ELK](https://eclipse.dev/elk/) via elkjs (layout) · FastAPI · React · Geist fonts.
+
+## License
+
+[Apache License 2.0](LICENSE). Copyright 2026 Mahdi-Si.

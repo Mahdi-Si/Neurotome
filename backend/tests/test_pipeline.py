@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
 from torch import nn
 
-from dissect.graph import graph_view, module_tree
-from dissect.runs import RunManager
-from dissect.store import RunStore
-from dissect.tensors import tensor_view
+from neurotome.graph import graph_view, module_tree
+from neurotome.runs import RunManager
+from neurotome.store import RunStore
+from neurotome.tensors import tensor_view
 
 
 class Block(nn.Module):
@@ -108,7 +110,7 @@ def test_attribution(manager, run, method):
 def test_http_api(manager, run):
     from fastapi.testclient import TestClient
 
-    from dissect.api import create_app
+    from neurotome.api import create_app
 
     c = TestClient(create_app(manager))
     assert c.get("/api/health").json()["ok"]
@@ -135,7 +137,7 @@ def test_torchvision_resnet18(manager):
 
 
 def test_stats_on_constant_tensors():
-    from dissect.capture import tensor_stats
+    from neurotome.capture import tensor_stats
 
     for arr in (
         np.full((1, 4, 3, 3), 2.5, dtype=np.float32),
@@ -145,3 +147,48 @@ def test_stats_on_constant_tensors():
         st = tensor_stats(arr)
         assert sum(st["hist"]) == arr.size
         assert tensor_view(arr)["hist"]["counts"]
+
+
+def test_live_models_are_lru_bounded(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from neurotome.api import create_app
+
+    mgr = RunManager(RunStore(tmp_path / "runs"), max_live_models=2)
+    ids = [mgr.create_from_objects(Tiny(), torch.randn(1, 3, 16, 16))["id"] for _ in range(3)]
+    assert list(mgr._live) == ids[1:]
+    with pytest.raises(RuntimeError, match="no longer loaded"):
+        mgr.attribution(ids[0], "gxa", None, 8)  # evicted in-process model cannot come back
+    mgr.attribution(ids[1], "gxa", None, 8)  # touch -> most recently used
+    assert list(mgr._live) == [ids[2], ids[1]]
+    assert TestClient(create_app(mgr)).delete(f"/api/runs/{ids[1]}").json()["deleted"]
+    assert list(mgr._live) == [ids[2]] and not mgr.store.exists(ids[1])
+
+
+def test_evicted_spec_run_reloads(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parent))
+    mgr = RunManager(RunStore(tmp_path / "runs"), max_live_models=1)
+    first = mgr.create_from_spec("py:test_pipeline:Tiny", None, {"kind": "random", "shape": [1, 3, 16, 16]})
+    mgr.create_from_objects(Tiny(), torch.randn(1, 3, 16, 16))
+    assert first["id"] not in mgr._live
+    assert mgr.attribution(first["id"], "gxa", None, 8)["scores"]
+    assert list(mgr._live) == [first["id"]]
+
+
+def test_max_live_models_setting(monkeypatch):
+    from neurotome.config import get_settings
+
+    monkeypatch.delenv("NEUROTOME_MAX_LIVE_MODELS", raising=False)
+    assert get_settings().max_live_models == 2
+    monkeypatch.setenv("NEUROTOME_MAX_LIVE_MODELS", "5")
+    assert get_settings().max_live_models == 5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("method", ["gxa", "ig"])
+def test_capture_and_attribution_on_cuda(tmp_path, method):
+    mgr = RunManager(RunStore(tmp_path / "runs"), device="cuda")
+    run = mgr.create_from_objects(Tiny().cuda(), torch.randn(1, 3, 16, 16))
+    assert mgr.store.ir(run["id"])["ops"]
+    res = mgr.attribution(run["id"], method, None, 8)
+    assert res["scores"] and len(res["input"]["map"]) == 16

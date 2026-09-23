@@ -2,7 +2,7 @@
 
 Run from the repo root (so `examples` is importable):
 
-    dissect capture py:examples.custom_model:build
+    neurotome capture py:examples.custom_model:build
     # or in the UI's "New run" form, model = py:examples.custom_model:build
 
 A module used this way may define:

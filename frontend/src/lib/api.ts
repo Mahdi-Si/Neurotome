@@ -1,4 +1,4 @@
-import type { Attribution, GraphView, Method, ModuleEntry, RunMeta, TensorView } from "./types";
+import type { Attribution, Fold, GraphView, IndexEntry, Method, ModuleEntry, RunMeta, TensorView } from "./types";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
@@ -35,15 +35,18 @@ export const api = {
     return req<{ upload_id: string; name: string }>("/api/uploads", { method: "POST", body: fd });
   },
   modules: (id: string) => req<ModuleEntry[]>(`/api/runs/${enc(id)}/modules`),
-  graph: (id: string, depth: number, attr?: { method: Method; target?: number | null; steps?: number }) => {
+  graph: (id: string, depth: number, attr?: { method: Method; target?: number | null; steps?: number }, fold?: Fold) => {
     const q = new URLSearchParams({ depth: String(depth) });
     if (attr) {
       q.set("method", attr.method);
       if (attr.target != null) q.set("target", String(attr.target));
       if (attr.steps) q.set("steps", String(attr.steps));
     }
+    if (fold?.expand.length) q.set("expand", fold.expand.join(","));
+    if (fold?.collapse.length) q.set("collapse", fold.collapse.join(","));
     return req<GraphView>(`/api/runs/${enc(id)}/graph?${q}`);
   },
+  index: (id: string) => req<IndexEntry[]>(`/api/runs/${enc(id)}/index`),
   tensor: (id: string, op: string, opts: { channel?: number | null; py?: number; px?: number } = {}) => {
     const q = new URLSearchParams();
     if (opts.channel != null) q.set("channel", String(opts.channel));

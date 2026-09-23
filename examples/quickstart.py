@@ -10,7 +10,7 @@ import sys
 import torch
 import torchvision
 
-import dissect
+import neurotome
 
 weights = torchvision.models.ResNet18_Weights.DEFAULT
 model = torchvision.models.resnet18(weights=weights).eval()
@@ -25,4 +25,4 @@ else:
     name = "random input"
 
 # Captures every op, then serves the UI (Ctrl+C to stop).
-dissect.open(model, x, name=name, categories=weights.meta["categories"])
+neurotome.open(model, x, name=name, categories=weights.meta["categories"])

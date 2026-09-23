@@ -1,18 +1,19 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dissect"
+name = "neurotome"
 version = "0.1.0"
 description = "Open a PyTorch model and see every signal: computation graph, activations and attribution in one UI."
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.2",
   "torchvision>=0.17",
   # TorchLens changes its API between minor versions; the adapter in
-  # dissect/capture.py is written against 2.34. Bump deliberately.
+  # neurotome/capture.py is written against 2.34. Bump deliberately.
   "torchlens>=2.34,<2.35",
   "captum>=0.9,<0.10",
   "fastapi>=0.115",
@@ -27,13 +28,13 @@ dependencies = [
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5"]
 
 [project.scripts]
-dissect = "dissect.cli:main"
+neurotome = "neurotome.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["dissect*"]
+include = ["neurotome*"]
 
 [tool.setuptools.package-data]
-dissect = ["static/**/*"]
+neurotome = ["static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

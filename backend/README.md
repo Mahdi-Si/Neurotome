@@ -1,4 +1,4 @@
-# dissect (Python package)
+# neurotome (Python package)
 
-Backend of Dissect: capture, graph and tensor views, attribution, HTTP API and CLI.
+Backend of Neurotome: capture, graph and tensor views, attribution, HTTP API and CLI.
 See the repository README and docs/ARCHITECTURE.md.

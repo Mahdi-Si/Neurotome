@@ -1,4 +1,4 @@
-"""Command line: ``dissect serve`` and ``dissect capture``."""
+"""Command line: ``neurotome serve`` and ``neurotome capture``."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="dissect", description="Open a PyTorch model and see every signal.")
+    p = argparse.ArgumentParser(prog="neurotome", description="Open a PyTorch model and see every signal.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="start the local server (API + UI)")
@@ -27,9 +27,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     if getattr(args, "runs_dir", None):
-        os.environ["DISSECT_RUNS_DIR"] = args.runs_dir
+        os.environ["NEUROTOME_RUNS_DIR"] = args.runs_dir
     if getattr(args, "device", None):
-        os.environ["DISSECT_DEVICE"] = args.device
+        os.environ["NEUROTOME_DEVICE"] = args.device
 
     if args.cmd == "serve":
         import uvicorn
@@ -38,8 +38,8 @@ def main(argv: list[str] | None = None) -> int:
 
         st = get_settings()
         host, port = args.host or st.host, args.port or st.port
-        print(f"Dissect -> http://{host}:{port}   runs: {st.runs_dir}")
-        uvicorn.run("dissect.api:create_app", factory=True, host=host, port=port, reload=args.reload)
+        print(f"Neurotome -> http://{host}:{port}   runs: {st.runs_dir}")
+        uvicorn.run("neurotome.api:create_app", factory=True, host=host, port=port, reload=args.reload)
         return 0
 
     if args.cmd == "capture":
@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         from .store import RunStore
 
         st = get_settings()
-        mgr = RunManager(RunStore(st.runs_dir), st.device, st.max_capture_bytes)
+        mgr = RunManager(RunStore(st.runs_dir), st.device, st.max_capture_bytes, st.max_live_models)
         sample = {"kind": "random"}
         if args.image:
             with open(args.image, "rb") as f:

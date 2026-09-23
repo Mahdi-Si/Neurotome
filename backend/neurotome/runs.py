@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,11 +24,18 @@ class Live:
 
 
 class RunManager:
-    def __init__(self, store: RunStore, device: str = "cpu", max_capture_bytes: int | None = None):
+    def __init__(
+        self,
+        store: RunStore,
+        device: str = "cpu",
+        max_capture_bytes: int | None = None,
+        max_live_models: int = 2,
+    ):
         self.store = store
         self.device = device
         self.max_capture_bytes = max_capture_bytes
-        self._live: dict[str, Live] = {}
+        self.max_live_models = max_live_models
+        self._live: OrderedDict[str, Live] = OrderedDict()  # LRU: most recently used last
         self._lock = threading.Lock()  # one capture / attribution at a time (GPU memory)
         self.uploads = store.root / "_uploads"
         self.uploads.mkdir(exist_ok=True)
@@ -108,22 +116,39 @@ class RunManager:
             }
             self.store.write_json(run_id, "ir.json", ir)
             self.store.write_json(run_id, "meta.json", meta)
-            self._live[run_id] = Live(loaded, inputs)
+            self._keep_live(run_id, Live(loaded, inputs))
             return meta
+
+    def delete(self, run_id: str) -> None:
+        with self._lock:
+            self.store.delete(run_id)
+            if self._live.pop(run_id, None) is not None:
+                _free_cuda()
+
+    def _keep_live(self, run_id: str, live: Live) -> Live:
+        self._live[run_id] = live
+        self._live.move_to_end(run_id)
+        evicted = False
+        while len(self._live) > max(self.max_live_models, 0):
+            self._live.popitem(last=False)
+            evicted = True
+        if evicted:
+            _free_cuda()
+        return live
 
     def live(self, run_id: str) -> Live:
         if run_id in self._live:
+            self._live.move_to_end(run_id)
             return self._live[run_id]
         meta = self.store.meta(run_id)
         if not meta.get("reloadable"):
             raise RuntimeError(
                 "This run was created in-process and its model is no longer loaded. "
-                "Re-run dissect.open(model, x) to attribute it."
+                "Re-run neurotome.open(model, x) to attribute it."
             )
         loaded = load_model(meta["model"]["spec"], meta["model"]["weights"], self.device)
         inputs = torch.load(self.store.run_dir(run_id) / "inputs.pt", map_location=self.device)
-        self._live[run_id] = Live(loaded, inputs)
-        return self._live[run_id]
+        return self._keep_live(run_id, Live(loaded, inputs))
 
     def attribution(self, run_id: str, method: str, target: int | None, steps: int) -> dict[str, Any]:
         name = f"attribution/{method}_{'top' if target is None else target}_{steps}.json"
@@ -149,6 +174,11 @@ class RunManager:
                 u["path"] = where.get(u["op"], u["op"])
         self.store.write_json(run_id, name, result)
         return result
+
+
+def _free_cuda() -> None:
+    if torch.cuda.is_initialized():
+        torch.cuda.empty_cache()
 
 
 def _to_device(inputs: Any, device: str) -> Any:

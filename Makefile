@@ -1,25 +1,36 @@
 VENV ?= .venv
-PY := $(VENV)/bin/python
-PIP := $(VENV)/bin/pip
+# POSIX venvs put executables in bin/, Windows venvs in Scripts/.
+ifeq ($(OS),Windows_NT)
+BIN := $(VENV)/Scripts
+EXE := .exe
+PYTHON ?= python
+DEV := powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1
+else
+BIN := $(VENV)/bin
+PYTHON ?= python3
+DEV := ./scripts/dev.sh
+endif
+PY := $(BIN)/python
+PIP := $(PY) -m pip
 
 .PHONY: install dev build serve test test-backend test-frontend lint clean
 
-$(VENV)/bin/python:
-	python3 -m venv $(VENV)
+$(PY)$(EXE):
+	$(PYTHON) -m venv $(VENV)
 
-install: $(VENV)/bin/python
+install: $(PY)$(EXE)
 	$(PIP) install -U pip
 	$(PIP) install -e "./backend[dev]"
 	cd frontend && npm install
 
 dev:
-	./scripts/dev.sh
+	$(DEV)
 
 build:
 	cd frontend && npm run build
 
 serve:
-	$(VENV)/bin/dissect serve
+	$(BIN)/neurotome serve
 
 test: test-backend test-frontend
 
@@ -33,5 +44,5 @@ lint:
 	cd backend && ../$(PY) -m ruff check .
 
 clean:
-	rm -rf backend/dissect/static frontend/dist runs .pytest_cache backend/.pytest_cache
+	rm -rf backend/neurotome/static frontend/dist runs .pytest_cache backend/.pytest_cache
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

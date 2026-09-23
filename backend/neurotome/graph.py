@@ -3,11 +3,13 @@
 The raw IR has one node per tensor op (ResNet-18: ~70, a 7B LLM: tens of thousands),
 which is unreadable. ``graph_view`` folds every module deeper than ``depth`` into
 a single node and wraps the rest in module *groups*, the dashed boxes in the UI.
+``expand`` / ``collapse`` override the depth rule per module call.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Any
 
 PRETTY_TYPES = {"iadd": "add", "__iadd__": "add", "__add__": "add", "iadd_": "add", "imul": "mul"}
@@ -45,41 +47,75 @@ def module_tree(ir: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def graph_view(ir: dict[str, Any], depth: int = 2, scores: dict[str, float] | None = None) -> dict[str, Any]:
-    ops = {o["id"]: o for o in ir["ops"]}
-    order = [o["id"] for o in ir["ops"]]
-    mods = ir.get("modules", {})
-
-    ops_in_call: dict[str, list[str]] = defaultdict(list)
+def _ops_in_call(ir: dict[str, Any]) -> dict[str, list[str]]:
+    """Module call -> its op ids, in first-use order."""
+    out: dict[str, list[str]] = defaultdict(list)
     for o in ir["ops"]:
         for call in o["modules"]:
-            ops_in_call[call].append(o["id"])
+            out[call].append(o["id"])
+    return out
 
-    # 1. assign every op to a visible node
+
+def _stack(o: dict[str, Any]) -> list[str]:
+    return [] if (o["is_input"] or o["is_output"]) else o["modules"]
+
+
+def _op_names(o: dict[str, Any], ops_in_call: dict[str, list[str]]) -> tuple[str, str, str]:
+    """(label, path, type) of an op node."""
+    addr = o.get("module") or ""
+    if not addr and o["modules"] and len(ops_in_call[o["modules"][-1]]) == 1:
+        addr = strip_call(o["modules"][-1])  # e.g. BatchNorm, whose buffers hide its atomicity
+    kind = PRETTY_TYPES.get(o["type"], o["type"])
+    label = "input" if o["is_input"] else "output" if o["is_output"] else (_short(addr) if addr else kind)
+    return label, addr or o["id"], kind
+
+
+def _meta(o: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(dtype, device) of an op's output; None when not recorded (pre-M1 runs have no device)."""
+    return o.get("dtype") or None, o.get("device")
+
+
+def graph_view(
+    ir: dict[str, Any],
+    depth: int = 2,
+    scores: dict[str, float] | None = None,
+    expand: Iterable[str] = (),
+    collapse: Iterable[str] = (),
+) -> dict[str, Any]:
+    ops = {o["id"]: o for o in ir["ops"]}
+    order = [o["id"] for o in ir["ops"]]
+    pos = {oid: i for i, oid in enumerate(order)}
+    mods = ir.get("modules", {})
+    expand, collapse = set(expand), set(collapse)
+    ops_in_call = _ops_in_call(ir)
+
+    def folds(c: str, i: int) -> bool:
+        return (c in collapse or (i >= depth and c not in expand)) and len(ops_in_call[c]) > 1
+
+    # 1. assign every op to a visible node: it folds into the first collapsed multi-op call of its stack
     node_of: dict[str, str] = {}
     containers_of: dict[str, list[str]] = {}
     members: dict[str, list[str]] = defaultdict(list)
     for oid in order:
-        o = ops[oid]
-        stack = [] if (o["is_input"] or o["is_output"]) else o["modules"]
-        if len(stack) > depth and len(ops_in_call[stack[depth]]) > 1:
-            nid = "m:" + stack[depth]
-            containers = stack[:depth]
+        stack = _stack(ops[oid])
+        fold = next((i for i, c in enumerate(stack) if folds(c, i)), None)
+        if fold is not None:
+            nid = "m:" + stack[fold]
+            containers = stack[:fold]
         else:
             nid = oid
             # an op that is alone in its leaf module does not need a box around it
             containers = [c for c in stack if len(ops_in_call[c]) > 1]
-            containers = containers[:depth] if len(stack) > depth else containers
         node_of[oid] = nid
         members[nid].append(oid)
         containers_of.setdefault(nid, containers)
 
-    # 2. groups: only keep boxes that hold at least two visible nodes
+    # 2. groups: only keep boxes that hold at least two visible nodes (or were expanded by hand)
     group_nodes: dict[str, set[str]] = defaultdict(set)
     for nid, containers in containers_of.items():
         for c in containers:
             group_nodes[c].add(nid)
-    kept = {c for c, ns in group_nodes.items() if len(ns) >= 2}
+    kept = {c for c, ns in group_nodes.items() if len(ns) >= 2 or c in expand}
 
     def innermost(containers: list[str]) -> str | None:
         for c in reversed(containers):
@@ -87,8 +123,12 @@ def graph_view(ir: dict[str, Any], depth: int = 2, scores: dict[str, float] | No
                 return "g:" + c
         return None
 
+    def first_use(c: str) -> tuple[int, int]:  # ties (same first op) -> outer call first
+        first = ops_in_call[c][0]
+        return pos[first], ops[first]["modules"].index(c)
+
     groups = []
-    for c in sorted(kept, key=lambda c: order.index(ops_in_call[c][0])):
+    for c in sorted(kept, key=first_use):
         addr = strip_call(c)
         # parent group = nearest kept ancestor in any member's stack
         some = next(iter(group_nodes[c]))
@@ -128,22 +168,13 @@ def graph_view(ir: dict[str, Any], depth: int = 2, scores: dict[str, float] | No
             }
         else:
             o = ops[nid]
-            addr = o.get("module") or ""
-            if not addr and o["modules"] and len(ops_in_call[o["modules"][-1]]) == 1:
-                addr = strip_call(o["modules"][-1])  # e.g. BatchNorm, whose buffers hide its atomicity
-            label = (
-                "input"
-                if o["is_input"]
-                else "output"
-                if o["is_output"]
-                else (_short(addr) if addr else PRETTY_TYPES.get(o["type"], o["type"]))
-            )
+            label, path, kind = _op_names(o, ops_in_call)
             node = {
                 "id": nid,
                 "kind": "op",
                 "label": label,
-                "path": addr or nid,
-                "type": PRETTY_TYPES.get(o["type"], o["type"]),
+                "path": path,
+                "type": kind,
                 "num_ops": 1,
                 "num_params": o["num_params"],
             }
@@ -158,6 +189,15 @@ def graph_view(ir: dict[str, Any], depth: int = 2, scores: dict[str, float] | No
                 "is_output": nid in ops and ops[nid]["is_output"],
             }
         )
+        dtype, device = _meta(out_op)
+        counted = [st for m in mem if (st := ops[m].get("stats")) and "nan" in st and "inf" in st]
+        node.update(
+            {
+                "dtype": dtype,
+                "device": device,
+                "nonfinite": sum(st["nan"] + st["inf"] for st in counted) if counted else None,
+            }
+        )
         nodes.append(node)
 
     # 4. edges between visible nodes
@@ -168,12 +208,50 @@ def graph_view(ir: dict[str, Any], depth: int = 2, scores: dict[str, float] | No
             s = node_of.get(p)
             if s is None or s == t:
                 continue
-            edges.setdefault((s, t), {"source": s, "target": t, "shape": ops[p]["shape"]})
+            if (s, t) in edges:
+                continue
+            dtype, device = _meta(ops[p])
+            target_dtype, target_device = _meta(ops[oid])
+            edges[(s, t)] = {
+                "source": s,
+                "target": t,
+                "shape": ops[p]["shape"],
+                "dtype": dtype,
+                "device": device,
+                "target_dtype": target_dtype,
+                "target_device": target_device,
+            }
 
     view = {"depth": depth, "nodes": nodes, "edges": list(edges.values()), "groups": groups}
     if scores is not None:
         attach_scores(view, scores)
     return view
+
+
+def search_index(ir: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every op (IR order), then every module call with more than one op (first-use order)."""
+    # ponytail: the full index goes to the client; above ~20k ops switch to server-side ?q= filtering
+    ops_in_call = _ops_in_call(ir)
+    mods = ir.get("modules", {})
+    ops = {o["id"]: o for o in ir["ops"]}
+    out = []
+    for o in ir["ops"]:
+        label, path, kind = _op_names(o, ops_in_call)
+        out.append(
+            {"id": o["id"], "kind": "op", "label": label, "path": path, "type": kind,
+             "shape": o["shape"], "calls": list(_stack(o))}
+        )  # fmt: skip
+    for call, members in ops_in_call.items():
+        if len(members) < 2:
+            continue
+        addr = strip_call(call)
+        stack = ops[members[0]]["modules"]
+        out.append(
+            {"id": "m:" + call, "kind": "module", "label": _short(addr), "path": addr,
+             "type": mods.get(addr, {}).get("class_name", "module"),
+             "shape": ops[members[-1]]["shape"], "calls": stack[: stack.index(call)]}
+        )  # fmt: skip
+    return out
 
 
 def attach_scores(view: dict[str, Any], scores: dict[str, float]) -> None:

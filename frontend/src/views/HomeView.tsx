@@ -40,7 +40,7 @@ export function HomeView() {
     <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
       <aside style={{ width: 232, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "18px 12px", display: "flex", flexDirection: "column", gap: 24 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 8px" }}>
-          <span style={{ display: "flex", alignItems: "center", gap: 9 }}><Logo /><span className="lbl" style={{ fontSize: 12, fontWeight: 500, letterSpacing: ".14em" }}>Dissect</span></span>
+          <span style={{ display: "flex", alignItems: "center", gap: 9 }}><Logo /><span className="lbl" style={{ fontSize: 12, fontWeight: 500, letterSpacing: ".14em" }}>Neurotome</span></span>
           <span className="lbl dim">v0.1</span>
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 2 }} aria-label="Primary">
@@ -132,11 +132,11 @@ export function HomeView() {
           <div style={{ width: 420, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: "32px 28px", display: "flex", flexDirection: "column", gap: 16 }}>
             <h2 style={{ fontSize: 30 }}>From Python</h2>
             <pre className="panel mono" style={{ margin: 0, padding: "14px 16px", border: "1px solid var(--line)", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>
-{`import dissect
-dissect.open(model, x)
+{`import neurotome
+neurotome.open(model, x)
 `}<span className="dim"># captures, then serves this UI</span>{`
 
-$ dissect capture torchvision:resnet18 \\
+$ neurotome capture torchvision:resnet18 \\
     --weights DEFAULT --image cat.jpg`}
             </pre>
             <span className="dim" style={{ fontSize: 12 }}><span className="lbl">Runs directory</span><br /><span className="mono" style={{ wordBreak: "break-all" }}>{health.data?.runs_dir ?? "…"}</span></span>

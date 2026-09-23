@@ -70,3 +70,7 @@ h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.04em; }
 .scroll { overflow: auto; scrollbar-width: thin; }
 .empty { padding: 40px; color: var(--ink-2); }
 .err { color: var(--negative-text); }
+
+/* the graph canvas is one tab stop; arrow keys move the selection inside it */
+.graph-canvas:focus { outline: none; }
+.graph-canvas:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -2px; }

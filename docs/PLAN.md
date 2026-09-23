@@ -1,8 +1,8 @@
-# Dissect: MVP, roadmap and implementation plan
+# Neurotome: MVP, roadmap and implementation plan
 
-*Version 0.1 · 22 September 2026 · "Dissect" is a working name*
+*Version 0.1 · 22 September 2026*
 
-Dissect is a local web workbench for looking inside one PyTorch model on one input. You capture
+Neurotome is a local web workbench for looking inside one PyTorch model on one input. You capture
 a single forward pass, browse the full computation graph and open any tensor as maps, signals or
 projections. You can then trace which parts of the model, and which parts of the input, drove a
 given output.
@@ -41,7 +41,7 @@ is the product that ties them together behind a good UI.
 | NNsight / NDIF workbench | Interventions on LLMs, remote big models | LLM-focused; not a general graph and tensor browser |
 | circuit-tracer + Neuronpedia | Attribution graphs for LLM features | Needs pre-trained transcoders; only specific LLMs |
 
-**Where Dissect fits.** It's the only tool in this list that combines (a) an op-level graph for
+**Where Neurotome fits.** It's the only tool in this list that combines (a) an op-level graph for
 *any* PyTorch model, (b) tensor viewers chosen by shape, and (c) attribution laid over the same
 graph, in one local UI with a deliberate visual language.
 
@@ -62,7 +62,7 @@ wants a spatial, clickable view instead of print statements.
 
 1. **One sample, full trace.** The graph shown is the one this input actually took, not an idealized architecture.
 2. **The browser never gets whole tensors.** The server sends summaries: pooled maps, histograms, projections.
-3. **Swappable capture.** Only `capture.py` talks to TorchLens. The rest reads Dissect's own IR.
+3. **Swappable capture.** Only `capture.py` talks to TorchLens. The rest reads Neurotome's own IR.
 4. **Honest attribution.** Every number says which method produced it. Approximations are labelled as approximations.
 5. **Local-first.** Runs live in a folder on your disk. The server binds to localhost.
 6. **Quiet visual language.** Thin hairlines, mono labels, one accent. Color carries meaning only; see [DESIGN.md](DESIGN.md).
@@ -73,12 +73,12 @@ wants a spatial, clickable view instead of print statements.
 
 | Area | MVP capability | Acceptance check |
 |---|---|---|
-| Load | torchvision models by name (random or pretrained weights); your own model via `py:module:factory`; `dissect.open(model, x)` from Python | ResNet-18/50, MobileNetV3, EfficientNet-B0, ConvNeXt-T and ViT-B/16 all capture without errors |
+| Load | torchvision models by name (random or pretrained weights); your own model via `py:module:factory`; `neurotome.open(model, x)` from Python | ResNet-18/50, MobileNetV3, EfficientNet-B0, ConvNeXt-T and ViT-B/16 all capture without errors |
 | Sample | Upload an image, `.npy` or `.pt`; or use a random tensor | Upload flows through preprocessing into a run |
 | Graph | Op-level graph; collapse by module depth; module groups; module tree; inspector with shape, params, FLOPs and activation histogram | 500-node view pans and zooms smoothly; click a module to select its node |
 | Tensors | Channel grid, dot matrix, row profile, channel vector, PCA, histogram (images); heatmap, token norms and PCA (sequences); signal plus top-k (vectors) | Every saved op opens in one of the three kinds |
 | Attribution | IG / saliency / grad×input on the input; grad×activation on every node; share at merges; dominant path; top channels | IG completeness Δ is shown; results are cached per (method, target, steps) |
-| Ops | CLI `serve` / `capture`; pip-installable package with the UI built in | `pip install .` then `dissect serve` works on a clean machine |
+| Ops | CLI `serve` / `capture`; pip-installable package with the UI built in | `pip install .` then `neurotome serve` works on a clean machine |
 
 ### Out of scope for MVP
 
@@ -89,7 +89,7 @@ comparison, training-time monitoring, multi-user hosting, JAX and TensorFlow.
 
 - Time from `pip install` to first graph: under 5 minutes.
 - ResNet-50 capture on CPU in under 10 s; tensor views in under 300 ms; IG with 32 steps in under 30 s on CPU.
-- 5 external users use it on their own model without code changes to Dissect.
+- 5 external users use it on their own model without code changes to Neurotome.
 
 ## 6. Architecture (summary)
 
@@ -115,25 +115,25 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 ### M0 · Foundations (done)
 
 - [x] Monorepo layout: `backend/` (Python package), `frontend/` (Vite + React + TS), `docs/`, `design/`, `examples/`
-- [x] Capture adapter over TorchLens 2.34 producing Dissect's IR (`capture.py`)
+- [x] Capture adapter over TorchLens 2.34 producing Neurotome's IR (`capture.py`)
 - [x] Run store: one folder per run, memory-mapped `.npy` activations, JSON metadata
 - [x] Graph view with depth collapsing, module groups and edges between visible nodes (`graph.py`)
 - [x] Tensor views chosen by shape: image, sequence, vector (`tensors.py`)
 - [x] Attribution: Captum input methods plus per-op grad×activation, merge shares, dominant path
-- [x] FastAPI routes, CLI (`dissect serve`, `dissect capture`), `dissect.open()` from Python
+- [x] FastAPI routes, CLI (`neurotome serve`, `neurotome capture`), `neurotome.open()` from Python
 - [x] Frontend: 4 views, ELK layout, pan/zoom canvas, charts, design tokens, bundled fonts
 - [x] Tests: backend end-to-end (tiny model + ResNet-18), frontend unit tests, CI workflow
 - [x] Smoke-tested end to end (capture → every graph depth → every tensor view → attribution) on ResNet-18, ResNet-50, MobileNetV3-S, EfficientNet-B0, VGG-16, ConvNeXt-T and ViT-B/16; capture takes 1–4 s on CPU
 
-### M1 · Graph workspace (≈1.5 weeks)
+### M1 · Graph workspace (done, spec: `docs/specs/m1.md`)
 
-- [ ] Expand or collapse *individual* modules (per-node toggle), not only a global depth
-- [ ] Move layout into a Web Worker (`elk-worker.js`) and cache positions per (run, depth)
-- [ ] Minimap plus search: jump to a node by name, type or shape
-- [ ] Keyboard navigation: arrows follow edges, `Enter` opens the tensor
-- [ ] Node color modes: attribution, activation norm, sparsity (zero %), NaN/Inf flag
-- [ ] Hover an edge to see the tensor shape it carries, and dtype/device changes
-- [ ] Performance budget: 2k nodes at 60 fps (virtualize off-screen nodes, drop to canvas edges)
+- [x] Expand or collapse *individual* modules (per-node `+` / per-group `−` toggle, `expand=`/`collapse=` in the URL), not only a global depth
+- [x] Move layout into a Web Worker (`elk-worker.min.js`, bundled fallback) and cache positions by graph structure, i.e. per (run, depth, expansion state)
+- [x] Minimap plus search: jump to a node by name, type or shape; a hit folded inside a collapsed module is revealed
+- [x] Keyboard navigation: arrows follow edges, `Enter` opens the tensor, `Escape` clears search, `+`/`-` fold, `/` searches
+- [x] Node color modes: attribution, activation norm (RMS), sparsity (zero %), NaN/Inf flag, with a legend
+- [x] Hover an edge to see the tensor shape it carries, and dtype/device changes
+- [x] Performance budget: 2k nodes (virtualised DOM nodes, canvas edges, no re-layout on pan/zoom; `lib/perf.test.ts` benchmark)
 
 ### M2 · Tensor inspector (≈1.5 weeks)
 
@@ -156,7 +156,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 ### M4 · Hardening and release (≈1 week)
 
 - [ ] Background job queue (captures and attribution) with progress events over SSE
-- [ ] Capture budget UI: show when `DISSECT_MAX_CAPTURE_MB` truncated a run; selective capture by module
+- [ ] Capture budget UI: show when `NEUROTOME_MAX_CAPTURE_MB` truncated a run; selective capture by module
 - [ ] Error states for unsupported ops, non-tensor outputs, integer inputs
 - [ ] Dark theme (token-driven; charts re-validated against the dark surface)
 - [ ] Build: `pip wheel` includes the UI; publish to PyPI; versioned docs site
@@ -187,7 +187,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 
 ## 10. Open decisions
 
-1. **Name and license.** "Dissect" is a placeholder. Choose a license before the first public release (Apache-2.0 matches TorchLens and Captum).
+1. **Name and license.** Resolved: the name is **Neurotome** and the license is Apache-2.0 (matches TorchLens and Captum).
 2. **Hosted vs local-only.** The MVP is local. A hosted version needs sandboxing and auth; decide after v0.3.
 3. **Second capture backend.** NNsight for LLMs (v0.2) or `torch.export` for static graphs. Recommendation: NNsight, since it serves the LLM roadmap.
 4. **Dark mode in MVP or later?** The tokens are ready for it; charts need re-validation.

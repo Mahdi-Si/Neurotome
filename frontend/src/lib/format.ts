@@ -36,5 +36,8 @@ export function pct(n: number | null | undefined): string {
   return n == null ? "—" : `${Math.round(n * 100)}%`;
 }
 
+/** "torch.float32" → "float32"; missing (pre-M1 runs) → "—". */
+export const dtypeShort = (s: string | null | undefined) => (s ? s.replace(/^torch\./, "") : "—");
+
 /** Human name for a graph node: its module path, or its op label when it has no module. */
 export const displayName = (n: { id: string; path: string; label: string }) => (n.path === n.id ? n.label : n.path);

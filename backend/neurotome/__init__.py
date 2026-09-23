@@ -1,9 +1,9 @@
-"""Dissect: open a PyTorch model and see every signal.
+"""Neurotome: open a PyTorch model and see every signal.
 
 Quick use from a script or notebook::
 
-    import dissect
-    dissect.open(model, x)          # capture, then serve the UI at http://127.0.0.1:7070
+    import neurotome
+    neurotome.open(model, x)          # capture, then serve the UI at http://127.0.0.1:7070
 """
 
 from __future__ import annotations
@@ -37,11 +37,11 @@ def open(
     from .store import RunStore
 
     st = get_settings()
-    mgr = RunManager(RunStore(st.runs_dir), st.device, st.max_capture_bytes)
+    mgr = RunManager(RunStore(st.runs_dir), st.device, st.max_capture_bytes, st.max_live_models)
     meta = mgr.create_from_objects(model, inputs, name=name, categories=categories)
     port = port or st.port
     url = f"http://{st.host}:{port}/#/runs/{meta['id']}/graph"
-    print(f"Dissect -> {url}")
+    print(f"Neurotome -> {url}")
     server = uvicorn.Server(uvicorn.Config(create_app(mgr), host=st.host, port=port, log_level="warning"))
     if block:
         server.run()

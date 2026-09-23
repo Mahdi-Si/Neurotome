@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from .attribution import METHODS
 from .config import get_settings
-from .graph import graph_view, module_tree
+from .graph import graph_view, module_tree, search_index
 from .models import SUGGESTED_MODELS
 from .runs import RunManager
 from .store import RunStore
@@ -45,9 +45,11 @@ class AttributionRequest(BaseModel):
 def create_app(manager: RunManager | None = None) -> FastAPI:
     settings = get_settings()
     if manager is None:
-        manager = RunManager(RunStore(settings.runs_dir), settings.device, settings.max_capture_bytes)
+        manager = RunManager(
+            RunStore(settings.runs_dir), settings.device, settings.max_capture_bytes, settings.max_live_models
+        )
     store = manager.store
-    app = FastAPI(title="Dissect", version="0.1.0")
+    app = FastAPI(title="Neurotome", version="0.1.0")
     app.state.manager = manager
     app.add_middleware(
         CORSMiddleware,
@@ -108,7 +110,7 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
     @app.delete("/api/runs/{run_id}")
     def delete_run(run_id: str) -> dict[str, bool]:
         _meta(run_id)
-        store.delete(run_id)
+        manager.delete(run_id)
         return {"deleted": True}
 
     @app.get("/api/runs/{run_id}/modules")
@@ -122,12 +124,19 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         method: str | None = None,
         target: int | None = None,
         steps: int = 32,
+        expand: str = "",
+        collapse: str = "",
     ) -> dict[str, Any]:
         ir = _ir(run_id)
         scores = None
         if method:
             scores = manager.attribution(run_id, method, target, steps)["scores"]
-        return graph_view(ir, depth, scores)
+        calls = [[c for c in s.split(",") if c] for s in (expand, collapse)]
+        return graph_view(ir, depth, scores, *calls)
+
+    @app.get("/api/runs/{run_id}/index")
+    def index(run_id: str) -> list[dict[str, Any]]:
+        return search_index(_ir(run_id))
 
     @app.get("/api/runs/{run_id}/ops/{op_id}")
     def op(run_id: str, op_id: str) -> dict[str, Any]:

@@ -5,7 +5,7 @@ A model is named by a *spec* string so a run can be reloaded after a restart:
 * ``torchvision:resnet18``            any name accepted by ``torchvision.models.get_model``
 * ``py:examples.custom_model:build``  import ``build`` from a module on ``sys.path`` and call it
 
-Models built in-process (``dissect.open(model, x)``) have no spec and live only
+Models built in-process (``neurotome.open(model, x)``) have no spec and live only
 in memory for the server's lifetime; their captured data persists on disk.
 
 Loading ``py:`` specs imports and runs arbitrary code. The server binds to

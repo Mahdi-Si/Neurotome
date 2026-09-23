@@ -118,7 +118,8 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
           </div>
           <div style={{ flexGrow: 1, minHeight: 0, borderTop: "1px solid var(--line)" }}>
             {view
-              ? <GraphCanvas view={view} mode="flow" selected={selected} onSelect={(id) => navigate(href(run.id, "trace", { node: id }), true)} />
+              ? <GraphCanvas view={view} mode="flow" selected={selected} onSelect={(id) => navigate(href(run.id, "trace", { node: id }), true)}
+                  onOpen={(id) => navigate(href(run.id, "tensors", { node: view.nodes.find((n) => n.id === id)?.output_op ?? id }))} />
               : <div className="empty lbl dotgrid" style={{ height: "100%" }}>The backward path appears here</div>}
           </div>
         </section>

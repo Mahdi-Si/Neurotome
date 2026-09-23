@@ -1,4 +1,4 @@
-// Types mirroring the Python API (backend/dissect/api.py). Keep in sync with docs/API.md.
+// Types mirroring the Python API (backend/neurotome/api.py). Keep in sync with docs/API.md.
 
 export interface Stats {
   mean: number | null;
@@ -9,6 +9,8 @@ export interface Stats {
   hist: number[];
   hist_range: [number, number];
   numel: number;
+  nan?: number; // absent on pre-M1 runs
+  inf?: number;
 }
 
 export interface TopK { index: number; prob: number; logit: number; label: string | null }
@@ -45,9 +47,28 @@ export interface GraphNode {
   is_output: boolean;
   score?: number | null;
   score_norm?: number | null;
+  dtype?: string | null;
+  device?: string | null;
+  nonfinite?: number | null;
 }
 
-export interface GraphEdge { source: string; target: string; shape: number[]; share?: number; on_path?: boolean }
+export interface GraphEdge {
+  source: string; target: string; shape: number[];
+  dtype?: string | null; device?: string | null; target_dtype?: string | null; target_device?: string | null;
+  share?: number; on_path?: boolean;
+}
+
+export interface IndexEntry {
+  id: string; kind: "op" | "module"; label: string; path: string; type: string; shape: number[]; calls: string[];
+}
+
+/** Per-module fold overrides, as module calls, e.g. "layer1.0:1". */
+export interface Fold { expand: string[]; collapse: string[] }
+
+export type ColorMode = "plain" | "attr" | "norm" | "sparsity" | "nan";
+
+/** Per-node colour-mode value, computed by the view and drawn by GraphCanvas. */
+export interface NodeTone { v: number | null; flag?: boolean; readout: string } // v in [0,1] → tint + bar; flag → negative outline + badge
 
 export interface GraphGroup {
   id: string; address: string; class_name: string; num_params: number; parent: string | null; num_ops: number;
