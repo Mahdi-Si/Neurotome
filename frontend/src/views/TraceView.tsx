@@ -6,18 +6,22 @@ import { Crosshair } from "../components/Icons";
 import { InputOverlay, OverlayControls } from "../components/InputOverlay";
 import { InterventionBanner } from "../components/InterventionBanner";
 import { JobProgress } from "../components/JobProgress";
+import { SeriesMapChart } from "../components/SeriesMap";
+import { useSideWidth } from "../components/SideResize";
 import { TokenStrip } from "../components/TokenStrip";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
 import { fileName } from "../lib/exportPng";
-import { deltaLarge, displayName, fixed, num, pct, signed } from "../lib/format";
+import { deltaLarge, displayName, num, outScore, pct, signed } from "../lib/format";
 import { useJob } from "../lib/jobs";
 import { href, navigate, type Route } from "../lib/router";
-import { errText } from "../lib/tensorState";
+import { cellSpan, errText, inputHW } from "../lib/tensorState";
 import { useAsync } from "../lib/useAsync";
 import { tokenLabels } from "../lib/tokens";
-import { attrRequest, layerOp, logitsBlocked, parseTraceParams, traceParams, type TraceState } from "../lib/traceState";
-import type { AgreementResult, Attribution, GraphView, Job, LayerMethod, LayerResult, Method, NeuronResult, RunMeta } from "../lib/types";
+import {
+  attrRequest, isSeries, layerOp, logitsBlocked, parseTraceParams, seqTimeAxis, sliceText, stepText, traceParams, type TraceState,
+} from "../lib/traceState";
+import type { AgreementResult, Attribution, GraphView, Job, LayerMethod, LayerResult, Method, NeuronResult, OutputFull, RunMeta } from "../lib/types";
 
 const METHODS: { id: Method; label: string }[] = [
   { id: "gxa", label: "Grad × input" },
@@ -61,20 +65,54 @@ function BarRow({ name, sub, to, value, max }: { name: string; sub: string; to: 
   );
 }
 
+/** The Target of a values run with more than 5 outputs (a score per step): any index by number field or slider, with its
+ * label and value; `top prediction` and the top-5 stay quick picks in the select. */
+function StepPicker({ run, out, t, onPick }: { run: RunMeta; out: OutputFull; t: number | null; onPick: (t: number | null) => void }) {
+  const cur = t ?? run.output[0]?.index ?? 0;
+  // the field's text: only a valid 0…n−1 reaches the URL, so the field can be cleared and retyped
+  const [text, setText] = useState(String(cur));
+  useEffect(() => setText(String(cur)), [cur]);
+  const commit = (v: number) => { if (Number.isInteger(v) && v >= 0 && v < out.n && v !== t) onPick(v); };
+  return (
+    <div role="group" aria-label="Target" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
+      <span className="lbl dim">Target</span>
+      <select className="field" aria-label="Quick pick" value={t ?? ""} onChange={(e) => onPick(e.target.value === "" ? null : Number(e.target.value))}>
+        <option value="">top prediction</option>
+        {run.output.map((o) => <option key={o.index} value={o.index}>logit[{o.index}]{o.label ? ` · ${o.label}` : ""} · {outScore(o)}</option>)}
+        {t != null && !run.output.some((o) => o.index === t) && <option value={t}>logit[{t}]{out.labels?.[t] ? ` · ${out.labels[t]}` : ""}</option>}
+      </select>
+      <input className="field" type="number" aria-label="Output index" min={0} max={out.n - 1} step={1} value={text} style={{ width: 72 }}
+        onChange={(e) => { setText(e.target.value); commit(Number(e.target.value)); }} onBlur={() => setText(String(cur))} />
+      <input type="range" aria-label="Output index slider" min={0} max={out.n - 1} step={1} value={cur} style={{ width: 180, accentColor: "var(--accent)" }}
+        onChange={(e) => commit(Number(e.target.value))} />
+      <span className="lbl" style={ELLIPSIS}>{stepText(out, cur)}{t == null ? " · top" : ""} · of {out.n}</span>
+    </div>
+  );
+}
+
 export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
+  const [sideW, sideHandle] = useSideWidth("trace", 400);
   const s = parseTraceParams(route.params);
   const latest = useRef(s);
   latest.current = s;
   const set = (p: Partial<TraceState>) => navigate(href(run.id, "trace", traceParams({ ...latest.current, go: false, ...p })), true);
   const ivRes = useAsync(() => (s.iv ? api.intervention(run.id, s.iv) : null), [run.id, s.iv]);
   const ivResult = ivRes.data?.hash === s.iv ? ivRes.data : null;
+  // a values run (OUTPUT_KIND "values": a score per step) picks any output index, not only the top-5
+  const scores = run.output[0]?.prob === null;
+  const full = useAsync(() => (scores ? api.output(run.id) : null), [run.id, scores]);
+  const picker = full.data && full.data.n > 5 ? full.data : null;
 
   const [depth, setDepth] = useState(1);
   const [overlay, setOverlay] = useState(false);
+  const [wide, setWide] = useState(true);   // a time-series map widens the left aside (channels × time needs the room)
   const [alpha, setAlpha] = useState(0.6);
   const [metric, setMetric] = useState<AgreementMetric>("jaccard");
   const [pick, setPick] = useState<LayerMethod>(s.layer ?? "layer_ig");
   const [nonce, setNonce] = useState(0);
+  // the Steps field's text: only a valid 1–512 reaches the URL, so the field can be cleared and retyped
+  const [stepsText, setStepsText] = useState(String(s.steps));
+  useEffect(() => setStepsText(String(s.steps)), [s.steps]);
   const [res, setRes] = useState<{ attr: Attribution; req: AttrReq } | null>(null);
   const [view, setView] = useState<GraphView | null>(null);
   const [graphErr, setGraphErr] = useState<string | null>(null);
@@ -83,9 +121,12 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const neuron = useJob<NeuronResult>();
   const agree = useJob<AgreementResult>();
 
-  const loadGraph = (req: AttrReq, d: number) =>
-    api.graph(run.id, d, { method: req.method, target: req.target, steps: req.steps, objective: req.objective })
-      .then((v) => { setView(v); setGraphErr(null); }, (e) => setGraphErr(errText(e)));
+  const graphSeq = useRef(0);   // only the latest graph request lands (a slow depth-3 reply must not replace depth 0)
+  const loadGraph = (req: AttrReq, d: number) => {
+    const k = ++graphSeq.current;
+    return api.graph(run.id, d, { method: req.method, target: req.target, steps: req.steps, objective: req.objective })
+      .then((v) => { if (k === graphSeq.current) { setView(v); setGraphErr(null); } }, (e) => { if (k === graphSeq.current) setGraphErr(errText(e)); });
+  };
 
   const runMain = async () => {
     if (logitsBlocked(latest.current, run.output_error)) return false;
@@ -144,18 +185,36 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
   const methodLabel = attr?.method_label ?? METHODS.find((m) => m.id === s.m)!.label;
   const objLabel = !s.obj ? null
     : attr?.objective.kind === "unit" && attr.objective.op === s.obj.op && attr.objective.channel === s.obj.channel
-      ? attr.objective_label : `${s.obj.op} · ch ${s.obj.channel} · Σ spatial`;
+      ? attr.objective_label : `${s.obj.op} · ch ${s.obj.channel} · Σ positions`;
   const neuronOn = s.nc != null;
-  const map = neuronOn ? nr?.input.map : attr?.input?.map;
+  const input = neuronOn ? nr?.input : attr?.input;
+  const map = input?.map, series = isSeries(input) ? input : null;
   const toks = neuronOn ? null : attr?.tokens ?? null;   // token inputs: Layer IG / g×a / saliency on the embeddings
   const ig = attr?.input?.convergence_delta != null ? attr.input : attr?.tokens;
   const delta = ig?.convergence_delta;
+  // the map is pooled over the input's pixels: axes and readout speak input pixels
+  const hw = inputHW(run.input_shape), mr = map?.length ?? 0, mc = map?.[0]?.length ?? 0;
+  const mapAxes = hw ? { x: { from: 0, to: hw[1] - 1, label: "input x" }, y: { from: 0, to: hw[0] - 1, label: "input y" } }
+    : { x: { from: 0, to: Math.max(0, mc - 1), label: "cell" }, y: { from: 0, to: Math.max(0, mr - 1), label: "cell" } };
+  const mapReadout = (r: number, c: number, v: number) =>
+    `${hw ? `px (${cellSpan(hw[0], mr, r)}, ${cellSpan(hw[1], mc, c)})` : `cell (${r}, ${c})`} · rel ${num(v, 3)}`;
   const mapName = neuronOn ? fileName([run.id, "neuron", s.lop, `c${s.nc}`], "png") : fileName([run.id, attr?.method, "attr"], "png");
   const layerMethod = s.layer ?? pick;
+  // the attributed step of a series map: its input windows (the module's target_windows) and links into the input
+  const step = series && attr?.objective.kind === "logit" ? attr.objective.index : null;
+  const win = useAsync(() => (step != null ? api.windows(run.id, step) : null), [run.id, step]);
+  const inputOp = view?.nodes.find((n) => n.is_input)?.output_op ?? null;
+  const shape = run.input_shape;
+  const valuesHref = inputOp && shape?.length === 3 ? (steps: [number, number], ch: [number, number] | null) =>
+    href(run.id, "tensors", { node: inputOp, s: sliceText(shape, seqTimeAxis(shape, run.input), steps, ch) }) : undefined;
+  const marks = step != null && (win.data || win.error) ? {
+    step, windows: win.data?.windows ?? [], error: win.data?.error ?? win.error,
+    inputHref: inputOp ? href(run.id, "tensors", { node: inputOp, t: String(step) }) : null,
+  } : null;
 
   return (
     <>
-      <TopBar run={run} tab="trace" node={s.node} carry={{ iv: s.iv }}>
+      <TopBar run={run} tab="trace" node={s.node} op={selNode?.output_op} carry={{ iv: s.iv }}>
         <button type="button" className="btn solid lbl" disabled={main.busy || blocked} title={blocked ? run.output_error ?? undefined : undefined}
           onClick={() => void runMain()}>Run attribution</button>
       </TopBar>
@@ -168,12 +227,12 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
             <span className="pill lbl" style={ELLIPSIS} title={objLabel ?? undefined}>Unit · {objLabel}</span>
             <button type="button" className="chart-export lbl" onClick={() => set({ obj: null, go: true })}>← Logits</button>
           </div>
-        ) : (
+        ) : picker ? <StepPicker run={run} out={picker} t={s.t} onPick={(t) => set({ t })} /> : (
           <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span className="lbl dim">Target</span>
             <select className="field" value={s.t ?? ""} onChange={(e) => set({ t: e.target.value === "" ? null : Number(e.target.value) })}>
               {run.output.map((o) => (
-                <option key={o.index} value={o.index}>logit[{o.index}]{o.label ? ` · ${o.label}` : ""} · p {fixed(o.prob)}</option>
+                <option key={o.index} value={o.index}>logit[{o.index}]{o.label ? ` · ${o.label}` : ""} · {outScore(o)}</option>
               ))}
               {s.t != null && !run.output.some((o) => o.index === s.t) && <option value={s.t}>logit[{s.t}]</option>}
               <option value="">top prediction</option>
@@ -189,7 +248,9 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
         {(s.m === "ig" || s.layer || neuronOn) && (
           <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span className="lbl dim">Steps</span>
-            <input className="field" type="number" min={1} max={512} value={s.steps} onChange={(e) => set({ steps: Number(e.target.value) || 32 })} style={{ width: 72 }} />
+            <input className="field" type="number" min={1} max={512} step={1} value={stepsText} style={{ width: 72 }}
+              onChange={(e) => { setStepsText(e.target.value); const v = Number(e.target.value); if (Number.isInteger(v) && v >= 1 && v <= 512) set({ steps: v }); }}
+              onBlur={() => setStepsText(String(s.steps))} />
           </label>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -209,8 +270,13 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
       </div>
       {run.output_error && <div className="err mono" style={{ padding: "8px 20px", borderBottom: "1px solid var(--line)" }}>{run.output_error}</div>}
       <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
-        <aside className="scroll" style={{ width: 400, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><Crosshair /><span className="lbl dim">Input · {run.input_shape?.join("×")}</span></div>
+        <aside className="scroll" style={{ width: series && wide ? "min(760px, 50vw)" : 400, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <Crosshair />
+            <span style={{ flexGrow: 1 }} />
+            {series && <button type="button" className="chart-export lbl" aria-pressed={wide} onClick={() => setWide(!wide)}>{wide ? "Narrow →←" : "Widen ←→"}</button>}
+            <span className="lbl dim">Input · {run.input_shape?.join("×")}</span>
+          </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12 }}>
             <span className="num" style={{ fontSize: 26, fontWeight: 500, letterSpacing: "-0.03em" }}>{neuronOn ? "NEURON" : toks ? "TOKENS" : "SALIENCY"}</span>
             <span className="lbl" style={{ textAlign: "right" }}>
@@ -224,16 +290,19 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
               <JobError j={neuron} />
             </div>
           )}
-          {map && <OverlayControls run={run} on={overlay} onOn={setOverlay} alpha={alpha} onAlpha={setAlpha} />}
+          {map && !series && <OverlayControls run={run} on={overlay} onOn={setOverlay} alpha={alpha} onAlpha={setAlpha} />}
           <div className="rule-top" style={{ paddingTop: 12, borderBottom: "1px solid var(--line)" }}>
             {toks
               ? <TokenStrip tokens={tokenLabels(run, toks.scores.length) ?? run.sample.token_ids?.map(String) ?? toks.scores.map((_, i) => `#${i}`)}
                   scores={toks.scores} signed={toks.signed} />
+              : series
+              ? <SeriesMapChart m={series} label={neuronOn ? "Neuron conductance" : "Input attribution"} exportName={mapName} marks={marks} valuesHref={valuesHref} />
               : map
               ? overlay && run.preview
                 ? <InputOverlay run={run} grid={map} signed alpha={alpha} label={neuronOn ? "Neuron conductance over input" : "Input attribution over input"}
-                    exportName={mapName.replace(/\.png$/, "_overlay.png")} readout={(r, c, v) => `cell (${r}, ${c}) · rel ${num(v, 3)}`} />
-                : <DotMatrix grid={map} pitch={14} signed label={neuronOn ? "Neuron conductance" : "Input attribution"} exportName={mapName} />
+                    exportName={mapName.replace(/\.png$/, "_overlay.png")} readout={mapReadout} {...mapAxes} />
+                : <DotMatrix grid={map} pitch={Math.min(14, Math.floor(300 / Math.max(1, mc)))} signed label={neuronOn ? "Neuron conductance" : "Input attribution"} exportName={mapName}
+                    readout={mapReadout} {...mapAxes} />
               : !neuronOn && !main.busy && attr?.input_note
                 ? <div className="lbl dim" style={{ padding: "24px 0", textAlign: "left" }}>{attr.input_note}</div>
                 : <div className="empty lbl" style={{ padding: "60px 0", textAlign: "center" }}>
@@ -281,20 +350,33 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
           </div>
         </aside>
         <section style={{ flexGrow: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <div style={{ padding: "16px 20px 10px", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 16 }}>
+          <div style={{ padding: "16px 20px 10px", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "6px 16px", flexWrap: "wrap" }}>
             <h1 style={{ fontSize: 26, whiteSpace: "nowrap" }}>Where does it come from?</h1>
-            <span className="lbl dim" style={{ textAlign: "right" }}>
+            <span className="lbl dim" style={{ flex: "1 1 260px", textAlign: "right" }}>
               Edge width = flow · % = share of merge output (grad × input){approx ? " · some merges approximate (parent g×a)" : ""}
             </span>
           </div>
           <div style={{ flexGrow: 1, minHeight: 0, borderTop: "1px solid var(--line)" }}>
             {view
               ? <GraphCanvas view={view} mode="flow" selected={s.node} onSelect={(id) => set({ node: id, ...(s.lop && { lop: view.nodes.find((n) => n.id === id)?.output_op ?? s.lop, nc: null }) })}
-                  onOpen={(id) => navigate(href(run.id, "tensors", { node: view.nodes.find((n) => n.id === id)?.output_op ?? id }))} />
-              : <div className="empty lbl dotgrid" style={{ height: "100%" }}>The backward path appears here</div>}
+                  onOpen={(id) => navigate(href(run.id, "tensors", { node: view.nodes.find((n) => n.id === id)?.output_op ?? id, iv: s.iv }))} />
+              : (
+                <div className="empty dotgrid" style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, textAlign: "center" }}>
+                  <span className="lbl">{main.busy ? "Tracing the backward path…" : "The backward path appears here"}</span>
+                  {!main.busy && (
+                    <>
+                      <span className="lbl dim" style={{ maxWidth: 380 }}>
+                        Run attribution to trace which layers and channels carried the {s.obj ? "unit" : "prediction"}, from the output back to the input
+                      </span>
+                      <button type="button" className="btn solid lbl" disabled={blocked} onClick={() => void runMain()}>Run attribution</button>
+                    </>
+                  )}
+                </div>
+              )}
           </div>
         </section>
-        <aside className="panel scroll" style={{ width: 360, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+        {sideHandle}
+        <aside className="panel scroll" style={{ width: sideW, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
           {!lop && s.obj && <span className="lbl dim">Layer attribution · pick a node before the unit</span>}
           {lop && (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -315,7 +397,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
               <JobError j={layer} />
               {lr && (
                 <>
-                  <DivergingBars values={lr.channels} highlight={s.lop === lr.op ? s.nc : null} xLabel="channel"
+                  <DivergingBars values={lr.channels} highlight={s.lop === lr.op ? s.nc : null} xLabel="channel" yLabel="attribution"
                     onPick={(c) => set({ nc: c, lop: lr.op })} exportName={fileName([run.id, lr.method, lr.op], "png")} />
                   <div className="rule-top">
                     <Kv rows={[
@@ -327,7 +409,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
                     {lr.top.slice(0, 5).map((u) => (
                       <BarRow key={u.channel} name={`ch ${u.channel}`} sub={lr.path} value={u.value}
                         max={Math.max(1e-9, ...lr.top.slice(0, 5).map((t) => Math.abs(t.value)))}
-                        to={href(run.id, "tensors", { node: lopNode?.id ?? lr.op, c: String(u.channel) })} />
+                        to={href(run.id, "tensors", { node: lr.op, c: String(u.channel), iv: s.iv })} />
                     ))}
                   </div>
                 </>
@@ -340,7 +422,7 @@ export function TraceViewPage({ run, route }: { run: RunMeta; route: Route }) {
               {(attr?.top_units ?? []).map((u, i) => {
                 const n = byOp.get(u.op), d = ivResult?.nodes[u.op];
                 return <BarRow key={i} name={u.path ?? (n ? displayName(n) : u.op)} sub={`ch ${u.channel}${d ? ` · Δ rel ${pct(d.rel)}` : ""}`} value={u.value} max={maxUnit}
-                  to={href(run.id, "tensors", { node: n?.id ?? u.op, c: String(u.channel), iv: s.iv })} />;
+                  to={href(run.id, "tensors", { node: u.op, c: String(u.channel), iv: s.iv })} />;
               })}
               {!attr && <div className="kv"><span className="lbl dim">No attribution yet</span></div>}
             </div>

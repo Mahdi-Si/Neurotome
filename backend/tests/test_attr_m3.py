@@ -124,7 +124,7 @@ def test_unit_objective(captured):
     assert res["value"] == pytest.approx(float(np.asarray(saved)[0, 3].sum()), abs=1e-4)
     assert res["prob"] is None and res["target"] is None and res["logit"] is None
     assert res["objective"] == {"kind": "unit", "op": "relu_2_4", "channel": 3}
-    assert res["objective_label"] == "block.relu · ch 3 · Σ spatial"
+    assert res["objective_label"] == "block.relu · ch 3 · Σ positions"
     for later in ("conv2d_3_5", "add_1_6", "relu_3_7", "linear_1_10"):
         assert later not in res["scores"]
     assert "conv2d_2_3" in res["scores"]
@@ -163,7 +163,7 @@ def test_layer_methods(captured, resnet):
     assert res["objective_label"] == f"logit[{t}]" and len(res["top"]) == 8
     assert len(mgr.layer(run, "layer_cond", "conv2d_2_3", None, 8)["channels"]) == 8
     unit = mgr.layer(run, "layer_ig", "conv2d_2_3", None, 8, objective=UNIT)
-    assert unit["objective_label"] == "block.relu · ch 3 · Σ spatial"
+    assert unit["objective_label"] == "block.relu · ch 3 · Σ positions"
     with pytest.raises(ValueError, match="called 2 times"):
         mgr.layer(run, "layer_ig", "relu_2_4", None, 8)
     assert module_site(ir, "relu_3_7") == ("block.relu", 2)

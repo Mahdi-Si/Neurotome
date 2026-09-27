@@ -21,12 +21,31 @@
      Neurotome needs only `encode(text)`, `decode(ids)` and optional `pad_token_id` / `eos_token_id`. A causal LM
      (class name ending in `ForCausalLM` / `LMHeadModel`) with a tokenizer is an **LM** (`meta.model.lm`), which
      enables the logit lens. Image models use their `AutoImageProcessor` and `id2label` names.
+   - **`py:` module hooks** (read with `getattr`, all optional): `INPUT_SHAPE` (the random sample's shape),
+     `CATEGORIES` (class names), `TOKENIZER`, `preprocess(img)` (image → batched tensor), `OUTPUT_KIND`
+     (`"logits"` by default; `"values"` for score / regression outputs: the output summary is the top-5 by raw
+     value with `prob: null`, no softmax), and a dataset: `list_samples() -> [{ref, label, group}]` (called by
+     `models.list_samples(spec)`, which only imports the module and caches the list per spec for the server's
+     life) and `load_sample(ref) -> dict` (below), and `target_windows(index) -> [{label, start, stop, blocks,
+     kind}]`: the regions of the input's time axis that output element `index` reads (`kind` `target` = the step
+     itself, `context` = what it may read, `horizon` = the future it predicts; `blocks` names input blocks, null =
+     every channel). `models.target_windows(spec, index)` only imports the module; `runs.check_windows` checks the
+     return against the run's input (`GET /windows`, below). `examples/signal_model.py` is the worked example.
 2. **Input.** `RunManager.build_input` turns an upload (image / `.npy` / `.pt`), a text or a random spec into a
    tensor. Integer `.npy` arrays (token ids) stay `int64`; everything else becomes float32. A **text** sample is
    `tokenizer.encode(text)` as a `(1, T)` int64 tensor (400: no tokenizer, no tokens, or more than
    `min(512, n_positions)` tokens); a random sample of a model with a tokenizer is random token ids. Every `(1, T)`
    integer input of a model with a tokenizer records `sample.token_ids` and `sample.tokens` (one `decode([id])`
    each) in the meta.
+   A **dataset sample** (`{kind: "ref", ref}`, ref ≤ 512 chars) is the model module's `load_sample(ref)`, a dict:
+   `input` (a tensor or tuple of tensors, batch 1; required), `name`, `steps` (the transform raw → input in words),
+   `info` (metadata rows: str / int / float / null; anything else is stringified), `raw` (`{fs, t0, time_label,
+   channels: [{name, unit, values}]}`, the signal before the transform), `blocks` (`[{name, start, stop, labels,
+   unit}]`, column groups of a (1, T, C) input's last axis) and `time` (`{axis, step_s, t0}`: step i of that axis
+   sits at `t0 + i · step_s` on the raw signal's clock). `runs._check_sample` checks every key and raises a
+   `ValueError` naming what is wrong (400 / the capture job's error); an exception inside `load_sample` becomes
+   `load_sample('<ref>') failed: <type>: <message>`. A run of a dataset sample reloads like any `py:` run (the
+   model by spec, the input from `inputs.pt`); `load_sample` is not called again.
 3. **Capture.** The run's backend (explicit `backend`, or auto: NNsight above `NEUROTOME_NNSIGHT_PARAMS`
    parameters when nnsight is installed, else TorchLens; see Capture backends) records the forward pass.
    `capture.capture()` calls `torchlens.trace(model, x, layers_to_save="all")`, drops buffer
@@ -48,7 +67,9 @@
    image-like inputs, `input_preview.png`; `ir.json` and `meta.json` are written last (see Run folder).
 4. **Serve.** The API reads `ir.json` to build graph views on demand, and memory-maps `.npy` files to build tensor views.
 5. **Attribute** (on request, as a job). The objective is a logit or an internal unit (Σ over positions of
-   one channel of a module's output). `attribution.attribute()` re-traces with gradients, back-propagates the
+   one channel of a module's output; the **channel axis** is the features of a `(B, T, D)` tensor and axis 1
+   otherwise, as for interventions, so per-channel scores, layer methods and neuron conductance of a token tensor
+   are per feature). `attribution.attribute()` re-traces with gradients, back-propagates the
    objective, and returns grad×activation for every op plus each parent's grad×input through every merge
    (`merges`). It also runs a Captum method on the input, with a forward hook on the unit's module for a unit
    objective. Layer IG / conductance, neuron conductance and method agreement work the same way. The Trace view
@@ -60,7 +81,10 @@
    before/after diff row and its intervened stats; the downstream tensors are saved under the run's capture budget
    in `interventions/<hash>/`. TorchLens runs use **capture-time hooks** (a clean trace for each op's `raw_index`,
    then one edited `tl.trace(..., intervene=pick)`), not DAG replay: replay stops at multi-pass ops such as GPT-2's
-   residual adds (two passes of one layer), so downstream values after them were never recomputed. LM runs can also
+   residual adds (two passes of one layer), so downstream values after them were never recomputed. An edit of an
+   op that returns its input object (eval-mode dropout, which TorchLens records unchanged) moves to that input when
+   the op is the input's only consumer, which is the same edit (GPT-2's `attn` / `mlp` module nodes end in one);
+   otherwise it is refused. LM runs can also
    **generate**: greedy continuations, clean and with the edits as forward hooks on module outputs.
 
 ## Run folder (`runs/<run_id>/`)
@@ -68,9 +92,13 @@
 ```
 meta.json            run summary: model spec + the IR "model" block, sample, output top-k, output_error,
                      preview {width, height} | null
+output.npy           the whole output vector (to_logits of sample 0, float32); runs before it get one on the
+                     first GET /output (a forward pass of the live model)
 ir.json              the captured graph (below)
 inputs.pt            the exact input tensors, so attribution can re-run later
 input_preview.png    the input as a picture, <= 224 px; only for (N, 1|3, H, W) inputs with H, W >= 8
+input_raw.<ext>      the uploaded image as it was (jpg / png / gif / webp / bmp; other formats as png), 0.3.0+
+input_raw.npz        a dataset sample's raw signal: one float32 array per channel, c0, c1, …
 tensors/<op>.npy     one activation per saved op, float32, memory-mapped on read
 attribution/<method>_<okey>_<steps>.json            input + node attribution (with merges, objective)
 attribution/channels_<okey>.json                    per-op per-channel g×a (server-side only)
@@ -85,12 +113,21 @@ interventions/<hash>/generate_<n>.json              GenerationResult for n new t
 
 `okey` names the objective: `top` (the top prediction), the logit index, or `u_<op>_c<channel>` for a unit.
 An attribution file without `merges` (written before M3) is stale and recomputed, and so is one of an integer-input
-run with `input: null` and no `tokens` key (written before v0.2). Old `patch/*.json` files (M3) are ignored. Runs
+run with `input: null` and no `tokens` key (written before v0.2), and an attribution / neuron / agreement file
+whose `input_map` is not `"series-512"` (a sequence input's map was a 24×24 grid, then time pooled to 128
+columns) is recomputed too. Old `patch/*.json` files (M3) are ignored. Runs
 before v0.3 have no `interventions/` folder: their list is empty. Deleting a run deletes its interventions.
 
 The preview is de-normalised with the model's `(mean, std)` for uploaded images and min-max stretched per
 channel for random, tensor and in-process inputs. Runs captured before M2 have no preview and no `meta.preview`;
 they still open, and the UI disables the overlay.
+
+`meta.input` (since 0.3.0; absent before) is `{raw: {file, width, height, format, bytes} | null, steps: [str] | null,
+norm: [mean, std] | null}`: the uploaded image kept as `input_raw.<ext>`, the preprocessing in words, and the
+per-channel `(mean, std)` it normalised with (so `/input/model.png` can undo it). A dataset sample adds
+`blocks` and `time` as `load_sample` gave them (checked, JSON-safe; `null` otherwise), and its raw is
+`{kind: "signal", file: "input_raw.npz", fs, t0, time_label, channels: [{name, unit, length}]}` (an image raw has
+no `kind`). Its `meta.sample` is `{kind: "ref", ref, name, info}`.
 
 `meta.output_error` (since M4) is the `describe()` message of the top-k failure (for example "The model returned
 SimpleNamespace, which holds no tensor…"), `null` when the top-k worked; attribution fails with the same text.
@@ -103,7 +140,8 @@ Since v0.2 (all optional; readers use `.get`, so older runs open unchanged):
     "backend": "torchlens" | "nnsight",   // absent = torchlens
     "granularity": "op" | "module",        // module for nnsight
     "lm": true },                          // causal LM with a tokenizer: enables the logit lens; absent = false
-  "sample": { "kind": "random" | "image" | "tensor" | "text", "name": "the cat sat…",
+  "sample": { "kind": "random" | "image" | "tensor" | "text" | "ref", "name": "the cat sat…",
+    "ref": "rec01:0", "info": { "recording": "rec01" },   // kind ref only (a py: module's load_sample)
     "text": "the cat sat on the mat",      // kind text only
     "token_ids": [464, 3797],              // any (1, T) integer input of a model with a tokenizer
     "tokens": ["The", " cat"] },           // decode([id]) per id, same length as token_ids
@@ -199,8 +237,9 @@ are ignored):
    cloned parents and taking the vector-Jacobian product with c's gradient). When every incoming edge has such a
    pair, `share` = flow / Σ flow and `share_method: merge`. Otherwise (an op that could not be re-called, or a
    module node whose inputs meet inside non-merge ops) the node falls back to parent g×a, `share` = |parent
-   score| / Σ, labelled `share_method: parent`. A single incoming edge has `share` 1 and no method, and so has a
-   node no flow reaches (score 0 or missing, e.g. after a unit objective): there is nothing to split. The
+   score| / Σ, labelled `share_method: parent`. A single incoming edge has `share` 1 and no method. A node no flow
+   reaches (score 0 or missing, e.g. after a unit objective) has no `share_method`: its edges keep the parent
+   shares (1/n when no parent has a score) only so they can be drawn. The
    **dominant path** is a greedy walk along the highest-share parent from the output, or from the unit's node
    for a unit objective (`start`).
 
@@ -214,12 +253,15 @@ After dropping the batch axis (ranks above 3 fold into C; the attention test run
 
 | Kind | Shape | Payload |
 |---|---|---|
-| `attention` | (H, T, T), T > 1, finite, in [0, 1], every row sums to 1 (a softmax: attention probabilities) | every head (≤ 64) pooled to ≤ 64×64 and scaled to its max; the selected head (`channel`) pooled to ≤ 128×128; per-head entropy (bits) and mean weight on the previous / first / same token, with the `pattern` above 0.5; stats; histogram of the head |
+| `attention` | 3-D, K > 1, finite, in [0, 1], every row along the last axis sums to 1 ± 1e-2 (softmax, or entmax / sparsemax with exact zeros) or is all zero (a fully masked row), with at least half the rows summing to 1. `layout`: (H, T, T) is `hqk`; otherwise the heads are the smaller of the first two axes, ≤ 64 (ties heads-first): (H, Q, K) `hqk`, or (Q, H, K) `qhk` (heads in the middle, e.g. lag attention `(time, head, lag)`). A spatial softmax over W of a (C, H, W) map with C ≤ H therefore reads as C heads | `layout`, `square`, `heads`, `queries`, `keys` (`tokens` = Q); every head (≤ 64) pooled to ≤ 64×64 and scaled to its max; the selected head (`channel`) pooled to ≤ 128×128; per head over its live (not all-zero) rows: entropy (bits) and `entropy_norm` (÷ log₂ K), `sparsity` (fraction of exact zeros), `masked` (fraction of all-zero rows), `argmax` / `argmax_weight` (peak of the key profile); `key_profile` per head (mean weight per key over live queries, pooled to ≤ 256; for lag attention the lag profile). Square maps also get the mean weight on the previous / first / same token over queries 1…T−1 (query 0's only key under a causal mask is itself and the first token), with the `pattern` above 0.5; stats; histogram of the head |
 | `image` | (C, H, W), H, W > 1 (higher ranks fold into C) | top-32 channels by mean as 24×24 pooled maps; selected channel as 16×16 dots; peak-row profile; channel vector at a pixel; PCA of the H·W positions (≤400 points); histogram |
 | `sequence` | (T, D) | heatmap pooled to ≤64×128 (signed); per-token L2 norm; PCA of tokens; histogram |
 | `vector` | (D,) | values pooled to ≤512; top-10 by magnitude; histogram |
 
-Everything is pooled on the server, so no response carries more than a few thousand numbers.
+Everything is pooled on the server, so no response carries more than a few thousand numbers. View `stats`,
+histograms, `peak` and the vector `top` list read the finite values only (`null` when there are none, and for a
+non-finite `top` value); the plotted grids replace NaN with 0 and clamp ±inf to the finite range, so one NaN never
+blanks or rescales a chart (the values table shows the raw `nan` / `inf`).
 
 Image maps and dots are scaled on the server. `norm=channel` (default) scales each pooled grid by its own
 `[min, max]`; `norm=global` uses one range for every map, `[lo, hi]` when both are given (the compare view's shared
@@ -242,11 +284,12 @@ and flat C-order `values` (6 significant digits; non-finite values as `"nan"` / 
 | GET | `/api/health` | device, torch version, cuda, runs dir, `version` (`neurotome.__version__`), `max_capture_mb` (the server default; `null` when unlimited) |
 | GET | `/api/models` | `{suggested, methods, text: ["hf:gpt2", "hf:Qwen/Qwen2.5-0.5B"], backends: {hf: bool, nnsight: bool}, nnsight_params}`: suggested specs, attribution methods, the text models, which extras are installed, the auto-NNsight threshold |
 | GET | `/api/runs` | newest first |
-| POST | `/api/uploads` | multipart `file` → `{upload_id}` (≤64 MB) |
-| POST | `/api/runs` | `{model, weights, sample: {kind: random\|upload\|text, upload_id, text, shape, seed}, modules: [address] \| null, max_capture_mb: finite >0 \| null, backend: torchlens\|nnsight\|null}` → **202** + a `capture` Job (`run_id: null`, `result` = run meta when done); `text` is 1–10 000 chars; `backend` null = auto; 400 bad spec prefix, missing upload, `Text sample needs text`, or `nnsight` without the package; 422 bad types |
+| GET | `/api/samples?model=<spec>` | `{samples: [{ref, label, group}], error: str \| null}`: a `py:` module's `list_samples()` (import only, cached per spec); `[]` for other specs and modules without the hook; an import or hook failure answers 200 with `samples: []` and its message |
+| POST | `/api/uploads` | multipart `file` → `{upload_id}` (≤64 MB, read in bounded chunks); the id is a content hash with the suffix `.pt`, `.pth`, `.npy` or `.img` (anything else; images are recognised by content), so an upload is never importable as a `py:` module |
+| POST | `/api/runs` | `{model, weights, sample: {kind: random\|upload\|text\|ref, upload_id, text, ref, shape, seed}, modules: [address] \| null, max_capture_mb: finite >0 \| null, backend: torchlens\|nnsight\|null}` → **202** + a `capture` Job (`run_id: null`, `result` = run meta when done); `text` is 1–10 000 chars; `ref` ≤ 512 chars (a dataset sample: `load_sample(ref)`, checks above); `backend` null = auto; 400 bad spec prefix, missing upload, `Text sample needs text`, `A dataset sample needs its ref`, or `nnsight` without the package; 422 bad types |
 | GET / DELETE | `/api/runs/{id}` | meta / delete run folder |
 | GET | `/api/runs/{id}/modules` | module tree for the left rail |
-| GET | `/api/runs/{id}/graph?depth=2[&expand=a:1,b:1&collapse=c:1][&method=ig&target=207&steps=32][&iv=<hash>]` | graph view; `expand` / `collapse` are comma-separated module calls; with `method`, scores, shares and path attached; with `iv`, ops the intervention recorded carry its stats (colour modes, the inspector histogram) |
+| GET | `/api/runs/{id}/graph?depth=2[&expand=a:1,b:1&collapse=c:1][&method=ig&target=207&steps=32][&iv=<hash>]` | graph view; `expand` / `collapse` are comma-separated module calls; with `method`, scores, shares and path attached (`steps` 1–512, else 422); with `iv`, ops the intervention recorded carry its stats (colour modes, the inspector histogram) |
 | GET | `/api/runs/{id}/index` | search index: every op, then every multi-op module call, as `{id, kind, label, path, type, shape, calls}` |
 | GET | `/api/runs/{id}/ops/{op}` | one IR op |
 | GET | `/api/runs/{id}/ops/{op}/tensor?channel=&py=&px=&norm=channel\|global&cmap=seq\|div&lo=&hi=&iv=` | tensor view; for `kind: attention` `channel` selects the head; bad `norm` / `cmap` → 422; no tensor → 404 (below); `iv` below |
@@ -254,7 +297,14 @@ and flat C-order `values` (6 significant digits; non-finite values as `"nan"` / 
 | GET | `/api/runs/{id}/ops/{op}/slice.npy?s=<expr>&iv=` | the whole slice as a float32 `.npy` download; 400 bad expression, 413 over 2²⁴ values |
 | GET | `/api/runs/{id}/diff?a=<op>&b=<op>&a_iv=&b_iv=` | `{a, b, shape_a, shape_b, same_shape, diff}`; each side read through its intervention when given (clean vs intervened for one node: `a=b=op&b_iv=<hash>`); 404 when either tensor is missing |
 | GET | `/api/runs/{id}/input.png` | input preview (PNG); 404 for runs without one |
+| GET | `/api/runs/{id}/input` | the Input view: `{op, shape, dtype, sample, raw: {file, width, height, format, bytes} \| null, steps: [str] \| null, normalised, picture, channels: [{channel, mean, std, min, max}]}`; `steps` is the preprocessing in words (from the torchvision transform, the default pipeline, the Hugging Face image processor, the tokenizer, or `Custom: <module>.preprocess`); `channels` are over the finite values of sample 0, per channel for an (N, C, H, W) input (≤ 64), one row per block (with its `name`) for a (1, T, C) input with `blocks`, else one row with `channel: null`; old runs give `raw` / `steps` null. Also `blocks`, `time` (from `meta.input`) and `info` (`meta.sample.info`), null when absent |
+| GET | `/api/runs/{id}/input/raw` | the raw uploaded image (`input_raw.<ext>`), or a dataset signal's `input_raw.npz` (`application/octet-stream`); 404 for runs without one (random, text, tensor inputs, runs before 0.3.0) |
+| GET | `/api/runs/{id}/input/signal?points=1500` | a dataset sample's raw signal pooled with numpy to ≤ `points` (16–20 000) per channel: `{fs, t0, time_label, stride, channels: [{name, unit, length, stride, min: [], max: [], mean: []}]}`; point k covers raw samples `[k·stride, (k+1)·stride)`, NaN ignored (an all-NaN point is null), 5 significant digits; 404 without a signal raw |
+| GET | `/api/runs/{id}/input/matrix` | a float (1, T, C) input as heatmaps: `{time, steps: T, stride, blocks: [{name, unit, labels, start, lo, hi, values}]}`; `values[row][col]` = block column `start + row`, time mean-pooled to ≤ 600 columns of `stride` steps; `lo` / `hi` the block's unpooled range; no `blocks` → one block `input` over every column; 404 for any other input |
+| GET | `/api/runs/{id}/input/model.png` | the model input at its own resolution (≤ 1024 px), de-normalised with the run's `(mean, std)` or min–max stretched; 404 unless it is a picture |
 | GET | `/api/runs/{id}/graph?…&obj_op=<op>&obj_ch=<c>` | with a unit objective (both or neither, else 400): scores, merge shares and a path that starts at the unit |
+| GET | `/api/runs/{id}/output` | every output element for the step picker: `{n, stride, values, labels}`; `values` are `to_logits` of sample 0 (5 significant digits, non-finite → null), `labels` the run's `categories` (null without); above 4096 elements `values` is the max of each block of `stride` and `labels` is null |
+| GET | `/api/runs/{id}/windows?t=<int ≥ 0>` | `{windows: [{label, start, stop, blocks, kind}], error: str \| null}`: the run's `py:` module's `target_windows(t)` (import only; `[]` without the hook, for other specs and in-process runs). `runs.check_windows`: a list of dicts; `start` / `stop` ints, clipped to [0, T) of the input's time axis (`meta.input.time.axis`; else the series map's `time_axis` for a 3-D input; else the longer non-batch axis), windows left empty dropped; `kind` one of target / context / horizon; `blocks` null or names of the input's blocks as the series map groups them (`attribution.series_blocks`: `meta.input.blocks` when time is axis 1, else one block per raw signal channel named like the channel when their count is C, else one block `input`); `label` defaults to `<kind> <a>–<b>`. A hook that raises (`target_windows(3) failed: KeyError: 3`) or returns anything else (`window 0 names unknown block 'fhr_st'; the input's blocks are …`) answers 200 with `windows: []` and the message; 422 for t < 0, 404 unknown run |
 | POST | `/api/runs/{id}/attribution` | `{method: ig\|saliency\|gxa, target, steps, objective?: {op, channel}}` → cached result (synchronous); 400 on a bad objective. Integer inputs get `tokens` (below) and `input: null` |
 | POST | `/api/runs/{id}/jobs` | `{kind: attribution\|layer\|neuron\|agreement\|lens\|intervene\|generate, method, target, objective, steps, op, channel, interventions, max_new_tokens}` → Job; 404 unknown run, 400 missing fields, 422 bad kind / types / unknown fields. `lens`: `target` is a token id or null (the top prediction), result `LensResult`; 400 for a run that is not an LM. `intervene`: `interventions` (an InterventionSet) → `Job<InterventionResult>`; `generate`: `interventions`, `max_new_tokens` 1–64 (default 16) → `Job<GenerationResult>`; both answer 400 for everything that needs no model (normalisation, source runs, saved tensors, shapes; generation kinds and sites), and a cached set is a job born `done` (the job key is the cache file). The M3 kind `patch` and its `baseline` / `source_run` fields are gone (422) |
 | GET | `/api/runs/{id}/interventions` | `InterventionSummary[]` (`hash, name, created, labels, target, target_label, delta_logit, delta_prob, truncated`), newest first |
@@ -273,6 +323,30 @@ ids** (the pad token, else end-of-sequence, else 0), `LayerGradientXActivation`,
  "layer": "transformer.wte", "baseline_id": 50256,           // baseline_id: IG only
  "method_label": "Layer IG on transformer.wte · baseline token 50256"}
 ```
+
+**Input map** (`input`, a float input; neuron conductance's `input` too): signed and divided by its max |cell|, so
+in [−1, 1]. An image (or any input of another rank) is summed over channels and mean-pooled to ≤ 24×24:
+`{map, total, convergence_delta}`. A **sequence** — any 3-D float input, `(1, T, C)` or `(1, C, T)` — is a
+channel × time map (`input_map` → `series_map`). The time axis is `meta.input.time.axis`, else axis 1 when
+`load_sample` gave `blocks`, else the longer axis. Rows are channels in index order, cells are **sums** over
+`stride` = ⌈T / 512⌉ steps and `row_stride` = ⌈C / 160⌉ channels, so up to 512 steps and 160 channels every cell is
+one input element (a (1, 300, 126) input is a 126 × 300 map). Cells carry 3 significant digits (not decimals, so the
+many small cells of an unpooled map still add up) and `scale` is the divisor (`map × scale` = Σ a of a cell). Blocks are `meta.input.blocks` (time on axis 1), else one per raw signal channel when their count is C (the
+raw `(1, 2, 5280)` input of a model that transforms in the graph), else one block `input`:
+
+```jsonc
+{"kind": "series", "map": [[0.12, -1.0, …]],        // [ceil(C / row_stride)][ceil(T / stride)], 3 sig. digits
+ "total": 0.41, "convergence_delta": 0.002,          // Σ a over the whole input; Δ for IG only
+ "channels": 126, "row_stride": 1, "steps": 300, "stride": 1, "scale": 0.031,
+ "time": {"t0": -1198.0, "step_s": 4.0, "label": "s to delivery"},   // step i at t0 + i · step_s; null: steps only
+ "blocks": [{"name": "fhr_st", "start": 0, "stop": 36, "labels": ["ψ3 · 0.887 Hz", …], "unit": null,
+             "sum": 0.2, "abs": 1.3, "share": 0.44}],               // Σ a, Σ|a|, Σ|a| / Σ|a| of all channels
+ "time_totals": [0.01, -0.03, …]}                    // signed Σ over channels of each column
+```
+
+`time` is `meta.input.time` when its axis is the time axis, else the raw signal's clock (`t0`, `1 / fs`, its
+`time_label`) when every raw channel is T samples long (the input is the raw signal), else `null`. Shares sum to 1
+when the blocks cover every channel. Agreement over such maps names its basis `channel × time input map`.
 
 **Logit lens** (`LensResult`, `lens.py`): one forward pass with a pre-hook on block 0 (row `embed`) and a hook on
 every block; each row is `softmax(head(norm(resid)))` for the last ≤ 64 positions, so the last block's row equals the
@@ -298,6 +372,12 @@ is `the capture budget ({mb} MB) was reached before this op; capture again with 
 captured modules ({mods}); capture again with its module selected`, or `the op produced no tensor`.
 
 ## Errors (`errors.py`)
+
+**Request guard** (`api.SameOrigin`, every route): a request whose `Host` is not this machine (localhost, an IP
+literal, `NEUROTOME_HOST` or a name in `NEUROTOME_ALLOWED_HOSTS`) is refused with 403, so a page on another site
+that rebinds its DNS name to 127.0.0.1 cannot read runs; a POST / PATCH / DELETE whose browser `Origin` is neither
+the dev UI (`:5173`) nor this server gets 403 `Cross-origin request refused`, so a web page cannot upload files or
+start captures (`py:` specs run code).
 
 Every failure reaches the user as one plain message, never a traceback. `describe(e)` maps an exception to
 `(status, message)`; the API registers it for `ValueError` and `RuntimeError` (`{"detail": message}`), and the job
@@ -362,7 +442,9 @@ With a unit objective the layer must lie strictly before the unit (an ancestor o
 objective".
 Neuron conductance sums one channel's conductance over positions (Captum refuses aggregated neurons).
 **Agreement** compares the three input maps and, for an op, g×a / layer IG / layer conductance per channel:
-Jaccard and overlap of the top 10% by |value|, and Spearman of average ranks (`null` for a constant vector).
+Jaccard and overlap of the top 10% by |value| (exact zeros are never in a top set, so dead ReLU channels do not
+count as agreement), and Spearman of average ranks (`null` for a constant vector). Results cached before 0.3.0
+(without `seq_channels: "features"`) counted a token tensor's positions as its channels and are recomputed.
 
 **Interventions** (`RunManager.intervene`, kind `intervene`) take an InterventionSet:
 
@@ -394,8 +476,8 @@ or the unit vector `e_c`, broadcast along the channel axis.
 positions sorted and de-duplicated, `[]` → null); `hash = sha1(json.dumps(norm, sort_keys=True))[:12]`, so key and
 list order never change it. `RunManager.resolve` reads the source runs (store only), then the job runs a clean pass
 (`Clean pass`, the target), `downstream` (the edited ops and every IR descendant, IR order), `keep_ops` (the
-downstream ops the clean run saved as floats, walked under the run's budget, `ir.model.budget_bytes` else the
-server's, with the never-cross rule: `truncated`), the backend's `intervene` (`Intervene`) and saves the kept
+downstream ops the clean run saved as floats, walked under the run's budget, `ir.model.budget_bytes` (0 is a
+budget too) else the server's, with the never-cross rule: `truncated`), the backend's `intervene` (`Intervene`) and saves the kept
 tensors (`Save tensors i/N`). Result (`meta.json`):
 
 ```jsonc
@@ -450,17 +532,21 @@ Interactive docs live at `http://127.0.0.1:7070/docs` while the server runs.
 ## Configuration and CLI
 
 `NEUROTOME_RUNS_DIR` (default `./runs`), `NEUROTOME_HOST` / `NEUROTOME_PORT` (`127.0.0.1:7070`),
-`NEUROTOME_DEVICE` (`cpu`), `NEUROTOME_MAX_CAPTURE_MB` (the per-run activation budget, default 2048),
-`NEUROTOME_MAX_LIVE_MODELS` (default 2) and `NEUROTOME_NNSIGHT_PARAMS` (auto backend: NNsight above this many
-parameters, default 1e9).
+`NEUROTOME_DEVICE` (`cpu`), `NEUROTOME_MAX_CAPTURE_MB` (the per-run activation budget, default 2048; 0, a
+negative value or `inf` means unlimited), `NEUROTOME_MAX_LIVE_MODELS` (default 2), `NEUROTOME_NNSIGHT_PARAMS`
+(auto backend: NNsight above this many parameters, default 1e9) and `NEUROTOME_ALLOWED_HOSTS` (comma-separated
+host names the server answers besides localhost and IP literals; see the request guard). A value that is not a
+number stops the CLI with a one-line message.
 
 - `neurotome serve [--host] [--port] [--runs-dir] [--device] [--reload]`
-- `neurotome capture MODEL [--weights] [--image | --text "…"] [--backend torchlens|nnsight] [--runs-dir]
-  [--modules layer3,layer4] [--max-capture-mb 512]`: synchronous; `--text` is a text sample (models with a
-  tokenizer), `--backend` overrides the auto choice, `--modules` is comma-separated (whitespace stripped),
-  `--max-capture-mb` overrides the budget for this run.
+- `neurotome capture MODEL [--weights] [--image | --text "…" | --sample REF] [--backend torchlens|nnsight]
+  [--runs-dir] [--modules layer3,layer4] [--max-capture-mb 512]`: synchronous; `--text` is a text sample (models
+  with a tokenizer), `--sample` a dataset sample of a `py:` module (`load_sample(REF)`), `--backend` overrides the
+  auto choice, `--modules` is comma-separated (whitespace stripped),
+  `--max-capture-mb` overrides the budget for this run. A failed capture prints the plain message and exits 1.
 - `neurotome.open(model, x, tokenizer=None)` captures in-process (synchronously) and serves the UI; a tokenizer
-  labels token ids and, for a causal LM, enables the logit lens.
+  labels token ids and, for a causal LM, enables the logit lens. A second call on the same port adds its run to
+  the server that is already running.
 - Extras: `pip install 'neurotome[hf,nnsight]'`.
 
 ## Frontend (`frontend/src/`)
@@ -471,13 +557,13 @@ parameters, default 1e9).
 | `lib/router.ts` | Hash routes `#/runs/<id>/<graph\|tensors\|trace\|lens\|interventions>?node=…` (shareable deep links; the graph view also keeps `depth`, `expand`, `collapse`, `color`, and the intervention `iv` / `set`) |
 | `lib/tokens.ts` | Token labels: `showToken` (visible whitespace), `tokenLabels(run, n)`, `spanLabel` for pooled cells, `tokenTone` for the token strip |
 | `lib/lensState.ts` | Lens URL state (`t`, `mode`, `pos`), cell text, readout, `shortLayer` |
-| `lib/attentionState.ts` | Attention view helpers: `headReadout`, `patternLabel`, `axisLetters` (`B H Q K`) |
+| `lib/attentionState.ts` | Attention view helpers: `headReadout`, `patternLabel`, `headColumns` (head-table columns, square vs not), `axisLetters` (`B H Q K`, `B Q H K`) |
 | `lib/layout.ts` | ELK layered layout with nested groups. It runs in an ELK Web Worker (lazy-loaded; falls back to the bundled ELK where `Worker` is missing) behind a content-keyed cache, so pan, zoom, attribution and colour changes never re-lay out |
 | `lib/viewport.ts` | Pure viewport maths: visible-node and edge culling, node/edge hit tests, keyboard `step`, colour `mix` |
 | `lib/graphState.ts` | Pure graph-workspace state: fold (`expand`/`collapse`) URL params, search matching, colour modes (incl. `iv`: Intervention Δ; legacy `color=patch` parses as `iv`) |
 | `lib/interventionState.ts` | The intervention draft in the URL (`parseSet` / `setParam`, `addEdit` / `removeEdit`), index lists (`0,3,7–9`), `scopeAxes` (§ Interventions), `editLabel` (the server's label words), `deltaColor` |
 | `lib/composeState.ts` | Composing helpers: `toggleCells` / `cellsOf` (pixel selection through pooled cells), `divergeIndex`, `genReadout`, `sameModelRuns` |
-| `lib/traceState.ts` | Trace view URL state (`m`, `t`, `obj`+`ch`, `steps`, `layer`, `lop`, `nc`, `go`), the attribution request, agreement cell tones |
+| `lib/traceState.ts` | Trace view URL state (`m`, `t`, `obj`+`ch`, `steps`, `layer`, `lop`, `nc`, `go`), the attribution request, agreement cell tones, a series map's clock, row / column labels and block spans; a picked step's window rows / columns, `windowShares` (the "Where the attribution is" table), `zoomSpan`, `sliceText` / `blockChannels` / `seqTimeAxis` (the Values slice of a window or cell), `stepText` |
 | `lib/jobs.ts` | `followJob` (follow the job a POST starts: SSE or 400 ms polling; abort → server cancel), `runJob` on top of it, and the `useJob` hook (one job slot per panel) |
 | `lib/capture.ts` | Pure capture helpers: `hasTensor`, `parseModules`, `parseBudget`, `unsavedText`, `captureNote` (the partial-capture banner text) |
 | `lib/theme.ts` | Light / dark theme: `resolveTheme`, `storedFor`, WCAG `contrast`, `readTokens` / `useTokens` (canvases read tokens at draw time), `useTheme` toggle |
@@ -488,6 +574,7 @@ parameters, default 1e9).
 | `components/GraphSearch.tsx` | Search box over the `/index` entries (loaded once by GraphView, which also uses them so a ModuleTree pick folds and selects the module itself); selecting a result reveals and centres it |
 | `components/charts.tsx` | Histogram, DotMatrix, LinePlot, DivergingBars, Scatter, HeatCanvas; every chart has a hover readout and a PNG export |
 | `components/InputOverlay.tsx` | A channel or attribution map drawn over `input.png`, with opacity control |
+| `components/InputPanel.tsx`, `lib/inputState.ts` | The Input view (Tensors tab, input node): raw sample vs model input with pixel axis ranges, the preprocessing steps, per-channel value ranges; for a dataset sample the `Sample` info rows, the raw signal (one envelope plot per channel) and the (1, T, C) input as one heatmap per block, all on the raw signal's clock |
 | `components/ValuesTable.tsx` | Slice expression box, the capped values table and the `.npy` download |
 | `components/ComparePanel.tsx` | Compare two ops on a shared scale, with the diff statistics (attention ops show the selected head side by side) |
 | `components/panels.tsx` | Module tree, node inspector (with `Trace from` channel link, `Layer attribution` link and the Intervene section) |
@@ -497,6 +584,7 @@ parameters, default 1e9).
 | `components/JobProgress.tsx` | Job progress line with `Cancel`; the error text of a failed job |
 | `components/CaptureBanner.tsx` | The `Truncated` / `Selective` row under the TopBar for partial captures (Graph and Tensor views) |
 | `components/AgreementMatrix.tsx` | n×n method-agreement matrix (Jaccard or Spearman) with a hover readout and PNG export |
+| `components/SeriesMap.tsx` | A sequence input's attribution (Trace view): channel × time heatmap with block separators and names, the signed Σ per time column, block shares; with a picked step its window bands (`Band`, `StepLine`, `WindowLegend`, shared with the Input view), the `Full` / `Around step` zoom, the "Where the attribution is" table and the `Show input values` / `Show on input` links |
 | `components/TokenStrip.tsx` | Token attribution as inline tokens tinted by score (group `Token attribution`), with a readout |
 | `views/InterventionsView.tsx` | Interventions tab: compose a set (target, edits, add-edit form), run it, the saved list (open, rename, delete), the result (Δ logit / prob, top-k before / after, links) and generation (clean vs intervened continuations, per-step top tokens) |
 | `views/LensView.tsx` | Logit lens grid (layers × positions, `Top-1` / `Target` colour), target across layers, top-k at a cell |
@@ -554,6 +642,9 @@ falls back to `index.html`, except `/api/*` (a JSON 404) and paths that resolve 
 - **New edit kind**: a branch in `interventions.normalise` (its keys and checks), `edit_fn` (its replacement) and
   `label`, a value in `RunManager.resolve` if it reads other runs, the kind in `api.EditIn`, and the client's
   `EditKind` / `editLabel` / `EditForm`.
+- **A time-series model with a dataset**: give its `py:` module `list_samples()` / `load_sample(ref)` (and
+  `OUTPUT_KIND = "values"` for score outputs); see `examples/signal_model.py` and the README. Neurotome needs no
+  change: the Home form offers the samples, the Input view draws `raw`, `blocks` and `time` generically.
 - **New job kind**: one `RunManager` method that takes `progress` and caches its result, plus a branch in
   `RunManager.job()` (and the kind in `JobRequest`).
 - **New tensor view kind**: add a branch in `tensor_view()` returning `{kind: "...", ...}`, add the type

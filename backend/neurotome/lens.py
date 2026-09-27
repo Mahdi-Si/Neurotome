@@ -86,7 +86,8 @@ def logit_lens(
     for i, h in enumerate(resid):
         report(0.2 + 0.78 * i / len(resid), f"Project layer {i + 1}/{len(resid)}")
         with torch.no_grad():
-            p = torch.softmax(head(norm(h))[0, pos0:].float(), -1)  # (positions, vocab)
+            # the final norm is per position: project only the shown ones, not a (T, vocab) block per layer
+            p = torch.softmax(head(norm(h[:, pos0:]))[0].float(), -1)  # (positions, vocab)
         vals, ids = p.topk(min(k, vocab), -1)
         top.append([cells(v, j) for v, j in zip(vals, ids, strict=True)])
         pt = p[:, target]

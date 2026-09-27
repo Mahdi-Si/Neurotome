@@ -3,8 +3,25 @@ import type { Edit, EditKind, InterventionSet } from "./types";
 
 const KINDS: EditKind[] = ["zero", "mean", "resample", "constant", "scale", "steer"];
 
-const isEdit = (e: unknown): e is Edit =>
-  !!e && typeof e === "object" && typeof (e as Edit).op === "string" && KINDS.includes((e as Edit).kind);
+const nat = (x: unknown) => Number.isInteger(x) && (x as number) >= 0;
+const opt = (x: unknown, ok: (v: unknown) => boolean) => x == null || ok(x);
+const finiteNum = (x: unknown) => typeof x === "number" && Number.isFinite(x);
+const isPositions = (p: unknown) => p == null || p === "last" || (Array.isArray(p)
+  && (p.every(nat) || p.every((q) => Array.isArray(q) && q.length === 2 && q.every(nat))));
+const isDirection = (d: unknown) => {
+  const x = d as Record<string, unknown>;
+  return x?.kind === "channel" ? nat(x.channel)
+    : x?.kind === "contrast" && typeof x.run_a === "string" && typeof x.run_b === "string" && (x.pool === "mean" || x.pool === "last");
+};
+
+/** Every field the labels and the form read has its type: a hand-edited URL (`"alpha":"2"`) must not crash a view. */
+const isEdit = (e: unknown): e is Edit => {
+  const x = e as Record<string, unknown>;
+  return !!e && typeof e === "object" && typeof x.op === "string" && KINDS.includes(x.kind as EditKind)
+    && opt(x.channels, (c) => Array.isArray(c) && c.every(nat)) && isPositions(x.positions)
+    && opt(x.over, (o) => o === "positions" || o === "runs") && opt(x.source_run, (s) => typeof s === "string")
+    && opt(x.seed, nat) && opt(x.value, finiteNum) && opt(x.alpha, finiteNum) && opt(x.direction, isDirection);
+};
 
 /** The `set` URL param as a set; null when missing, malformed or without edits (never throws). */
 export function parseSet(params: URLSearchParams): InterventionSet | null {

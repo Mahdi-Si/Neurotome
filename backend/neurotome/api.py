@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import ipaddress
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
+import numpy as np
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -18,20 +22,62 @@ from .config import get_settings
 from .errors import describe
 from .graph import graph_view, module_tree, search_index, unsaved
 from .jobs import TERMINAL, Job
-from .models import SUGGESTED_MODELS, TEXT_MODELS
-from .runs import NotFound, RunManager, _module
+from .models import SUGGESTED_MODELS, TEXT_MODELS, list_samples
+from .runs import MAX_REF, NotFound, RunManager, _module, input_summary, matrix_view, signal_view
 from .slicing import SliceTooLarge, slice_npy, slice_table
 from .store import PREVIEW, safe_name
-from .tensors import tensor_diff, tensor_view
+from .tensors import input_preview, tensor_diff, tensor_view
 
 STATIC_DIR = Path(__file__).parent / "static"
 _JSON = TypeAdapter(Any)
+MAX_UPLOAD = 64 * 1024 * 1024
+DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
+def local_host(host: str | None, extra: tuple[str, ...] = ()) -> bool:
+    """A Host header naming this machine: localhost, an IP literal, or a name in ``extra``. A page on another
+    site that rebinds its DNS name to 127.0.0.1 still sends its own name, so it is refused."""
+    name = (urlsplit(f"//{host}").hostname or "") if host else ""
+    if not host or name in ("localhost", "testserver") or name.endswith(".localhost") or name in extra:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
+class SameOrigin:
+    """Refuse requests whose Host is not this machine (DNS rebinding: another site's page reading runs or
+    starting captures), and state-changing requests that a browser sent from another site (its ``Origin`` is
+    neither the dev UI nor this server): a web page must not upload files or start captures (``py:`` specs run
+    code)."""
+
+    def __init__(self, app: Any, hosts: tuple[str, ...] = ()):
+        self.app = app
+        self.hosts = hosts
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            h = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
+            if not local_host(h.get("host"), self.hosts):
+                detail = (f"Host {h.get('host')!r} refused: open Neurotome at http://127.0.0.1, or list "
+                          "the name in NEUROTOME_ALLOWED_HOSTS")  # fmt: skip
+                await JSONResponse({"detail": detail}, 403)(scope, receive, send)
+                return
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+            origin = h.get("origin")
+            if origin and origin not in DEV_ORIGINS and urlsplit(origin).netloc != h.get("host"):
+                await JSONResponse({"detail": "Cross-origin request refused"}, 403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class Sample(BaseModel):
-    kind: str = Field(default="random", pattern="^(random|upload|text)$")
+    kind: str = Field(default="random", pattern="^(random|upload|text|ref)$")
     upload_id: str | None = None
     text: str | None = Field(default=None, max_length=10000)  # kind text
+    ref: str | None = Field(default=None, max_length=MAX_REF)  # kind ref: a py: module's load_sample(ref)
     name: str | None = None
     shape: list[int] | None = None
     seed: int = 0
@@ -120,10 +166,11 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
     app.add_exception_handler(RuntimeError, error)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=DEV_ORIGINS,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(SameOrigin, hosts=(settings.host.lower(), *settings.allowed_hosts))
 
     def _meta(run_id: str) -> dict[str, Any]:
         try:
@@ -164,7 +211,8 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
             return f"Op {op_id} not found in {run_id}"
         why, model = unsaved(ir, op), ir["model"]
         if why == "budget":
-            budget = model.get("budget_bytes") or manager.max_capture_bytes or 0
+            budget = model.get("budget_bytes")
+            budget = (manager.max_capture_bytes if budget is None else budget) or 0
             reason = (f"the capture budget ({budget / 2**20:g} MB) was reached before this op; capture again "
                       "with a larger budget")  # fmt: skip
         elif why == "modules":
@@ -201,14 +249,23 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
             "nnsight_params": manager.nnsight_params,
         }
 
+    @app.get("/api/samples")
+    def samples(model: str) -> dict[str, Any]:
+        """The dataset samples a ``py:`` model module lists (``list_samples()``); [] for other specs. A module
+        that fails to import or list answers 200 with its error, so the form can say why."""
+        try:
+            return {"samples": list_samples(model), "error": None}
+        except Exception as e:  # noqa: BLE001 - arbitrary module code: its message, never a 500
+            return {"samples": [], "error": describe(e)[1]}
+
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
         return store.list_runs()
 
     @app.post("/api/uploads")
     async def upload(file: UploadFile = File(...)) -> dict[str, str]:
-        data = await file.read()
-        if len(data) > 64 * 1024 * 1024:
+        data = await file.read(MAX_UPLOAD + 1)  # never the whole of an oversized file in memory
+        if len(data) > MAX_UPLOAD:
             raise HTTPException(413, "Upload larger than 64 MB")
         name = file.filename or ""
         return {"upload_id": manager.save_upload(name or "upload", data), "name": name}
@@ -242,7 +299,7 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         depth: int = Query(2, ge=0, le=12),
         method: str | None = None,
         target: int | None = None,
-        steps: int = 32,
+        steps: int = Query(32, ge=1, le=512),  # as AttributionRequest: this route can compute attribution
         expand: str = "",
         collapse: str = "",
         obj_op: str | None = None,
@@ -313,6 +370,83 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         if not path.is_file():
             raise HTTPException(404, f"Run {run_id} has no input preview")
         return FileResponse(path, media_type="image/png")
+
+    def _input_op(run_id: str) -> dict[str, Any]:
+        op = next((o for o in store.ir(run_id)["ops"] if o["is_input"]), None)
+        if op is None:
+            raise HTTPException(404, f"Run {run_id} has no input op")
+        return op
+
+    @app.get("/api/runs/{run_id}/input")
+    def input_info(run_id: str) -> dict[str, Any]:
+        """The Input view: the raw sample, the preprocessing in words, the model input's shape and ranges."""
+        meta, op = _meta(run_id), _input_op(run_id)
+        x = np.asarray(_tensor(run_id, op["id"]))
+        info = meta.get("input") or {}  # absent before 0.3.0: no raw copy, no steps
+        pic = x.ndim == 4 and x.shape[1] in (1, 3) and min(x.shape[2:]) >= 8
+        return {"op": op["id"], "shape": op["shape"], "dtype": op.get("dtype"), "sample": meta["sample"],
+                "raw": info.get("raw"), "steps": info.get("steps"),
+                "normalised": info.get("norm") is not None,
+                "picture": bool(pic), "channels": input_summary(x, info.get("blocks")),
+                "blocks": info.get("blocks"), "time": info.get("time"),
+                "info": meta["sample"].get("info")}  # fmt: skip
+
+    @app.get("/api/runs/{run_id}/input/signal")
+    def input_signal(run_id: str, points: int = Query(1500, ge=16, le=20000)) -> dict[str, Any]:
+        """The raw signal of a dataset sample (``load_sample`` raw): min / max envelope + mean per channel."""
+        raw = (_meta(run_id).get("input") or {}).get("raw")
+        if not raw or raw.get("kind") != "signal":
+            raise HTTPException(404, f"Run {run_id} kept no raw signal")
+        return signal_view(store.run_dir(run_id), raw, points)
+
+    @app.get("/api/runs/{run_id}/input/matrix")
+    def input_matrix(run_id: str) -> dict[str, Any]:
+        """A float (1, T, C) model input as one time × column heatmap per block (``load_sample`` blocks)."""
+        info = _meta(run_id).get("input") or {}
+        x = np.asarray(_tensor(run_id, _input_op(run_id)["id"]))
+        if x.ndim != 3 or x.shape[0] != 1 or not np.issubdtype(x.dtype, np.floating):
+            raise HTTPException(404, f"The input of {run_id} is not a float (1, T, C) tensor")
+        return matrix_view(x, info.get("blocks"), info.get("time"))
+
+    @app.get("/api/runs/{run_id}/input/raw")
+    def input_raw(run_id: str) -> FileResponse:
+        raw = (_meta(run_id).get("input") or {}).get("raw")
+        path = store.run_dir(run_id) / Path(raw["file"]).name if raw else None
+        if path is None or not path.is_file():
+            raise HTTPException(404, f"Run {run_id} kept no raw input (uploaded images, dataset signals)")
+        mime = {".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+                ".npz": "application/octet-stream"}  # fmt: skip
+        return FileResponse(path, media_type=mime.get(path.suffix, "image/png"))  # not the OS's guess
+
+    @app.get("/api/runs/{run_id}/input/model.png")
+    def input_model_png(run_id: str) -> Response:
+        """The model input at its own resolution (<= 1024 px), de-normalised for display."""
+        norm = (_meta(run_id).get("input") or {}).get("norm")
+        x = np.asarray(_tensor(run_id, _input_op(run_id)["id"]), dtype=np.float32)
+        img = input_preview(x, (norm[0], norm[1]) if norm else None)
+        if img is None:
+            raise HTTPException(404, f"The input of {run_id} is not an image")
+        from PIL import Image
+
+        pic = Image.fromarray(img)
+        pic.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        pic.save(buf, format="PNG")
+        return Response(buf.getvalue(), media_type="image/png")
+
+    @app.get("/api/runs/{run_id}/output")
+    def output(run_id: str) -> dict[str, Any]:
+        """Every output element with its label (``RunManager.output``): the Trace view's step picker."""
+        _meta(run_id)
+        return manager.output(run_id)
+
+    @app.get("/api/runs/{run_id}/windows")
+    def windows(run_id: str, t: int = Query(..., ge=0)) -> dict[str, Any]:
+        """The input windows of output element ``t``: the py: module's ``target_windows(t)``, checked and
+        clipped (``runs.check_windows``); [] without the hook; a failing or malformed hook answers 200 with
+        its error."""
+        _meta(run_id)
+        return manager.windows(run_id, t)
 
     @app.post("/api/runs/{run_id}/attribution")
     def attribution(run_id: str, req: AttributionRequest) -> dict[str, Any]:
@@ -387,8 +521,10 @@ def create_app(manager: RunManager | None = None) -> FastAPI:
         def spa(path: str) -> FileResponse:
             if path.startswith("api/"):
                 raise HTTPException(404, f"No API route /{path}")
-            f = (STATIC_DIR / path).resolve()
-            if path and f.is_relative_to(STATIC_DIR.resolve()) and f.is_file():
+            # an anchored path (C:\, \\host\share) is never joined: resolving a UNC path on Windows
+            # would contact that host (and offer it the user's NTLM credentials)
+            f = None if Path(path).anchor else (STATIC_DIR / path).resolve()
+            if path and f and f.is_relative_to(STATIC_DIR.resolve()) and f.is_file():
                 return FileResponse(f)
             # revalidate the shell so a rebuilt frontend never points at deleted hashed assets
             return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})

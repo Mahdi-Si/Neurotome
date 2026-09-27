@@ -7,7 +7,8 @@ shape (after dropping the batch axis):
                           channel vector at a pixel, PCA of spatial positions
 * ``sequence`` (T, D)     token x feature heatmap, per-token norm, PCA of tokens
 * ``vector``   (D,)       1D signal and histogram
-* ``attention`` (H, T, T) rows are distributions over keys (softmax): per-head maps and pattern summary
+* ``attention`` (H, Q, K) or (Q, H, K) rows are distributions over keys (softmax / entmax): per-head maps,
+                          key profiles and a head summary; square (H, T, T) maps also get token patterns
 
 Higher-rank tensors are folded into ``image`` (leading axes merged into channels).
 Image maps are scaled per channel or on one global range (``norm``), sequentially to
@@ -101,6 +102,14 @@ def _pca2(x: np.ndarray, max_points: int = 400) -> tuple[np.ndarray, np.ndarray,
     return idx, coords, ratios
 
 
+def _stats(x: np.ndarray) -> dict[str, float | None]:
+    """mean / std / min / max over the finite values (None when there are none), like the IR's op stats."""
+    f = np.asarray(x, dtype=np.float32)[np.isfinite(x)]
+    if f.size == 0:
+        return dict.fromkeys(("mean", "std", "min", "max"))
+    return {"mean": float(f.mean()), "std": float(f.std()), "min": float(f.min()), "max": float(f.max())}
+
+
 def _drop_batch(a: np.ndarray) -> np.ndarray:
     """Remove the batch axis. Usually it is axis 0; some ops run sequence-first, e.g.
     (tokens, 1, dim) inside attention, so a singleton axis elsewhere is dropped instead."""
@@ -130,28 +139,34 @@ def tensor_view(
     a = _drop_batch(a)
     if a.ndim > 3:
         a = a.reshape(-1, *a.shape[-2:])
-    if _is_attention(a):
-        return _attention_view(a, shape, channel)
+    if layout := _is_attention(a):
+        return _attention_view(a if layout == "hqk" else a.transpose(1, 0, 2), shape, channel, layout)
+    raw = a  # stats, hist, peak and top read raw; plots a finite copy (NaN -> 0, +-inf -> the finite range)
+    if not np.isfinite(a).all():
+        r = _finite_range(a)
+        a = np.nan_to_num(a, nan=0.0, posinf=r[1], neginf=r[0])
     given = None  # the caller's [lo, hi] for norm=global
     if norm == "global" and lo is not None and hi is not None and bool(np.isfinite([lo, hi]).all()):
-        given = [float(lo), float(hi)]
+        given = sorted([float(lo), float(hi)])  # a reversed pair is the same range
     if a.ndim == 3 and a.shape[1] > 1 and a.shape[2] > 1:
         scale = None
         if norm == "global":
             scale = given or _finite_range(a)
-        return _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scale, cmap) | {
+        return _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scale, cmap, raw) | {
             "norm": norm,
             "cmap": cmap,
             "scale": scale,
         }
     if a.ndim == 3:
-        a = a.reshape(a.shape[0], -1)
+        a, raw = a.reshape(a.shape[0], -1), raw.reshape(raw.shape[0], -1)
     if a.ndim == 2:
-        return _sequence_view(a, shape, given)
-    return _vector_view(a.reshape(-1), shape)
+        return _sequence_view(a, shape, given, raw)
+    return _vector_view(a.reshape(-1), shape, raw.reshape(-1))
 
 
-def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scale, cmap) -> dict[str, Any]:
+def _image_view(
+    a, shape, channel, pixel, max_channels, map_size, dot_size, scale, cmap, raw
+) -> dict[str, Any]:
     C, H, W = a.shape
     means = a.reshape(C, -1).mean(axis=1)
     order = np.argsort(-means)[:max_channels]
@@ -166,7 +181,7 @@ def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scal
         m, r = scaled(pool2d(a[c], map_size, map_size))
         maps.append({"channel": int(c), "mean": float(means[c]), "map": _r(m, 2), "range": r})
     ch = a[sel]
-    peak = np.unravel_index(int(np.argmax(ch)), ch.shape)
+    peak = np.unravel_index(int(np.argmax(np.where(np.isnan(raw[sel]), -np.inf, raw[sel]))), ch.shape)
     py, px = peak if pixel is None else (min(max(pixel[0], 0), H - 1), min(max(pixel[1], 0), W - 1))
     dots, dots_range = scaled(pool2d(ch, dot_size, dot_size))
     profile = _pool1d(ch[py], 128)
@@ -184,26 +199,37 @@ def _image_view(a, shape, channel, pixel, max_channels, map_size, dot_size, scal
         "maps": maps,
         "dots": _r(dots, 3),
         "dots_range": dots_range,
-        "stats": {
-            "mean": float(ch.mean()),
-            "std": float(ch.std()),
-            "min": float(ch.min()),
-            "max": float(ch.max()),
-        },
+        "stats": _stats(raw[sel]),
         "peak": [int(peak[0]), int(peak[1])],
         "profile": {"row": int(py), "values": _r(profile)},
-        "hist": _hist(ch),
+        "hist": _hist(raw[sel]),
         "vector": {"pixel": [int(py), int(px)], "values": _r(_pool1d(vec, 512))},
         "pca": {"points": _r(coords), "color": _r(color, 2), "explained": _r(np.array(ratios), 3)},
     }
 
 
-def _is_attention(a: np.ndarray) -> bool:
-    """(H, T, T) with every query row a probability distribution over keys (softmax output; bf16 rows sum to
-    1 +- ~3e-3)."""
-    if a.ndim != 3 or a.shape[1] != a.shape[2] or a.shape[1] <= 1 or not np.isfinite(a).all():
-        return False
-    return bool(a.min() >= -1e-6 and a.max() <= 1 + 1e-6 and np.abs(a.sum(-1) - 1).max() <= 1e-2)
+def _is_attention(a: np.ndarray) -> str | None:
+    """The attention layout of a 3-D tensor ("hqk" / "qhk"), or None. Every row along the last axis is a
+    distribution over keys (softmax; entmax / sparsemax with exact zeros; bf16 rows sum to 1 +- ~3e-3), except
+    fully masked rows, which may be all zero (entmax of an all -inf row, nan_to_num'ed) while at least half
+    the rows sum to 1. (H, T, T) is heads-first; otherwise heads are the smaller of the first two axes (<= 64,
+    ties heads-first): (H, Q, K), or (Q, H, K) as in lag attention (time, head, lag). A spatial softmax over W
+    of a (C, H, W) map with C <= H therefore reads as C heads of H x W: its rows are distributions, which is
+    all the view shows."""
+    if a.ndim != 3 or a.shape[2] <= 1 or max(a.shape[:2]) <= 1:
+        return None
+    h0, h1, k = a.shape
+    if h1 == k:
+        layout = "hqk"
+    elif min(h0, h1) <= 64:
+        layout = "hqk" if h0 <= h1 else "qhk"
+    else:
+        return None
+    if not np.isfinite(a).all() or a.min() < -1e-6 or a.max() > 1 + 1e-6:
+        return None
+    s = a.sum(-1, dtype=np.float64)
+    one = np.abs(s - 1) <= 1e-2
+    return layout if bool((one | (s <= 1e-6)).all()) and one.mean() >= 0.5 else None
 
 
 def _unit_map(g: np.ndarray, nd: int) -> dict[str, Any]:
@@ -211,34 +237,52 @@ def _unit_map(g: np.ndarray, nd: int) -> dict[str, Any]:
     return {"map": _r(g / m if m > 0 else np.zeros_like(g), nd), "max": m}
 
 
-def _head_summary(h: int, p: np.ndarray) -> dict[str, Any]:
-    T = p.shape[0]
+def _head_summary(h: int, p: np.ndarray) -> tuple[dict[str, Any], np.ndarray]:
+    """One head (Q, K) -> (summary, key profile). Fully masked (all-zero) rows are left out of entropy,
+    sparsity and the key profile (mean weight per key over the live queries; for lag attention: per lag)."""
+    T, K = p.shape
+    live = p.sum(-1) > 1e-6
+    lp = p[live] if live.any() else p
     with np.errstate(divide="ignore", invalid="ignore"):
-        ent = -np.where(p > 0, p * np.log2(p), 0.0).sum(-1)
-    q = np.arange(T)
+        ent = float((-np.where(lp > 0, lp * np.log2(lp), 0.0).sum(-1)).mean())
+    prof = lp.mean(0)
+    k = int(np.argmax(prof))
     s = {
         "head": h,
-        "entropy": float(ent.mean()),
-        "prev": float(p[q[1:], q[1:] - 1].mean()),
-        "first": float(p[:, 0].mean()),
-        "self": float(p[q, q].mean()),
+        "entropy": ent,
+        "entropy_norm": ent / float(np.log2(K)),
+        "sparsity": float((lp == 0).mean()),
+        "masked": float(1 - live.mean()),
+        "argmax": k,
+        "argmax_weight": float(prof[k]),
     }
+    if T != K:
+        return s, prof
+    q = np.arange(1, T)  # query 0 attends to key 0 = itself = first under a causal mask: it says nothing
+    s |= {"prev": float(p[q, q - 1].mean()), "first": float(p[q, 0].mean()), "self": float(p[q, q].mean())}
     names = (("previous", "prev"), ("first", "first"), ("self", "self"))
-    return s | {"pattern": next((n for n, k in names if s[k] > 0.5), None)}
+    return s | {"pattern": next((n for n, k in names if s[k] > 0.5), None)}, prof
 
 
-def _attention_view(a: np.ndarray, shape: list[int], channel: int | None) -> dict[str, Any]:
-    H, T, _ = a.shape
+def _attention_view(a: np.ndarray, shape: list[int], channel: int | None, layout: str) -> dict[str, Any]:
+    """a is (H, Q, K) whatever the tensor's layout; ``tokens`` = Q (the query axis) for older readers."""
+    H, Q, K = a.shape
     head = min(max(int(channel or 0), 0), H - 1)
+    summary, profiles = zip(*(_head_summary(h, a[h].astype(np.float64)) for h in range(H)), strict=True)
     return {
         "kind": "attention",
         "shape": shape,
+        "layout": layout,
+        "square": Q == K,
         "heads": H,
-        "tokens": T,
+        "tokens": Q,
+        "queries": Q,
+        "keys": K,
         "head": head,
         "maps": [{"head": h} | _unit_map(pool2d(a[h], 64, 64), 2) for h in range(min(H, 64))],
         "full": _unit_map(pool2d(a[head], 128, 128), 3),
-        "summary": [_head_summary(h, a[h].astype(np.float64)) for h in range(H)],
+        "summary": list(summary),
+        "key_profile": [_r(_pool1d(pr, 256), 4) for pr in profiles],
         "stats": {
             "mean": float(a.mean()),
             "std": float(a.std()),
@@ -249,7 +293,8 @@ def _attention_view(a: np.ndarray, shape: list[int], channel: int | None) -> dic
     }
 
 
-def _sequence_view(a, shape, scale=None) -> dict[str, Any]:
+def _sequence_view(a, shape, scale=None, raw=None) -> dict[str, Any]:
+    raw = a if raw is None else raw
     T, D = a.shape
     pooled = pool2d(a, 64, 128)
     heat = _signed(pooled) if scale is None else _scale(pooled, scale[0], scale[1], "div")
@@ -263,13 +308,8 @@ def _sequence_view(a, shape, scale=None) -> dict[str, Any]:
         "heatmap": _r(heat, 3),
         "scale": scale,
         "token_norms": _r(norms),
-        "hist": _hist(a),
-        "stats": {
-            "mean": float(a.mean()),
-            "std": float(a.std()),
-            "min": float(a.min()),
-            "max": float(a.max()),
-        },
+        "hist": _hist(raw),
+        "stats": _stats(raw),
         "pca": {
             "points": _r(coords),
             "color": _r(_norm01(norms[idx]), 2),
@@ -278,21 +318,17 @@ def _sequence_view(a, shape, scale=None) -> dict[str, Any]:
     }
 
 
-def _vector_view(a, shape) -> dict[str, Any]:
-    top = np.argsort(-np.abs(a))[:10]
+def _vector_view(a, shape, raw=None) -> dict[str, Any]:
+    raw = a if raw is None else raw
+    top = np.argsort(-np.abs(raw))[:10]
     return {
         "kind": "vector",
         "shape": shape,
         "length": int(a.shape[0]),
         "values": _r(_pool1d(a, 512)),
-        "top": [{"index": int(i), "value": float(a[i])} for i in top],
-        "hist": _hist(a),
-        "stats": {
-            "mean": float(a.mean()),
-            "std": float(a.std()),
-            "min": float(a.min()),
-            "max": float(a.max()),
-        },
+        "top": [{"index": int(i), "value": _num(raw[i])} for i in top],
+        "hist": _hist(raw),
+        "stats": _stats(raw),
     }
 
 

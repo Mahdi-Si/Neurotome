@@ -1,12 +1,12 @@
 // Interventions tab: saved interventions (left), the draft set + an edit form, the open result, and generation for LMs.
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Readout } from "../components/charts";
 import { EditForm } from "../components/EditForm";
 import { JobProgress } from "../components/JobProgress";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
-import { editable, genReadout, topReadout } from "../lib/composeState";
-import { displayName, fixed, num, shapeShort, signed } from "../lib/format";
+import { editable, genReadout, moduleSites, topReadout } from "../lib/composeState";
+import { displayName, fixed, num, outScore, shapeShort, signed } from "../lib/format";
 import { addEdit, deltaColor, editLabel, parseSet, removeEdit, setParam } from "../lib/interventionState";
 import { useJob } from "../lib/jobs";
 import { href, navigate, parseHash, type Route } from "../lib/router";
@@ -43,13 +43,16 @@ export function InterventionsViewPage({ run, route }: { run: RunMeta; route: Rou
   };
 
   const nodes = (graph.data?.nodes ?? []).filter(editable);
-  const pick = nodes.find((n) => n.output_op === nodeParam || n.id === nodeParam) ?? nodes[0] ?? null;
-  const pathOf = (op: string) => graph.data?.nodes.find((n) => n.output_op === op)?.path ?? op;
+  // the server's label paths (`transformer.h.6`, `layer1.0.relu@2`); a module node id from the Graph tab (`m:…`) → its op
+  const sites = useMemo(() => (graph.data ? moduleSites(graph.data) : null), [graph.data]);
+  const want = (nodeParam && sites?.op.get(nodeParam)) || nodeParam;
+  const pick = nodes.find((n) => n.output_op === want || n.id === want) ?? nodes[0] ?? null;
+  const pathOf = (op: string) => sites?.path.get(op) ?? graph.data?.nodes.find((n) => n.output_op === op)?.path ?? op;
   const genSet = r?.set ?? set;
 
   return (
     <>
-      <TopBar run={run} tab="interventions" node={nodeParam} carry={{ iv, set: setParam(set) }}>
+      <TopBar run={run} tab="interventions" node={nodeParam} op={pick?.output_op} carry={{ iv, set: setParam(set) }}>
         <button type="button" className="btn solid lbl" disabled={!set || job.busy} onClick={() => void runSet()}>Run interventions</button>
       </TopBar>
       <div style={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
@@ -74,7 +77,7 @@ export function InterventionsViewPage({ run, route }: { run: RunMeta; route: Rou
                 <select className="field" aria-label="Target" value={set?.target ?? ""} disabled={!set} style={{ minWidth: 0, flex: 1 }}
                   onChange={(e) => set && nav({ set: setParam({ ...set, target: e.target.value === "" ? null : Number(e.target.value) }) })}>
                   <option value="">top prediction</option>
-                  {run.output.map((o) => <option key={o.index} value={o.index}>{tokLabel(o)} · p {fixed(o.prob)}</option>)}
+                  {run.output.map((o) => <option key={o.index} value={o.index}>{tokLabel(o)} · {outScore(o)}</option>)}
                   {set?.target != null && !run.output.some((o) => o.index === set.target) && <option value={set.target}>#{set.target}</option>}
                 </select>
               </label>
@@ -98,11 +101,11 @@ export function InterventionsViewPage({ run, route }: { run: RunMeta; route: Rou
                   <span className="lbl dim" style={{ width: 72, flexShrink: 0 }}>Node</span>
                   <select className="field" aria-label="Node" value={pick?.output_op ?? ""} style={{ minWidth: 0, flex: 1 }}
                     onChange={(e) => nav({ node: e.target.value })}>
-                    {nodes.map((n) => <option key={n.id} value={n.output_op}>{displayName(n)} · {shapeShort(n.shape)}</option>)}
+                    {nodes.map((n) => <option key={n.id} value={n.output_op}>{sites?.path.get(n.output_op) ?? displayName(n)} · {shapeShort(n.shape)}</option>)}
                   </select>
                 </label>
               )}
-              {pick && <EditForm key={pick.output_op} run={run} op={{ id: pick.output_op, shape: pick.shape, path: pick.path }}
+              {pick && <EditForm key={pick.output_op} run={run} op={{ id: pick.output_op, shape: pick.shape, path: pathOf(pick.output_op) }}
                 onAdd={(e) => nav({ set: setParam(addEdit(set, e)) })} />}
             </div>
           </div>
@@ -122,6 +125,8 @@ function SavedList({ run, items, open, onOpen, onChanged }: {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const refocus = useRef<string | null>(null);   // the row whose name button takes focus back when renaming ends
+  const endRename = (hash: string) => { refocus.current = hash; setRenaming(null); };
   const act = (p: Promise<unknown>, after: () => void) =>
     p.then(() => { setErr(null); after(); onChanged(); }, (e) => setErr(errText(e)));
   if (!items.length) return <span className="lbl dim">No saved interventions · run a set to save one</span>;
@@ -134,11 +139,12 @@ function SavedList({ run, items, open, onOpen, onChanged }: {
             {renaming === s.hash ? (
               <input className="field" aria-label="Intervention name" autoFocus defaultValue={s.name} maxLength={80}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") void act(api.renameIntervention(run.id, s.hash, e.currentTarget.value), () => setRenaming(null));
-                  if (e.key === "Escape") setRenaming(null);
+                  if (e.key === "Enter") void act(api.renameIntervention(run.id, s.hash, e.currentTarget.value), () => endRename(s.hash));
+                  if (e.key === "Escape") endRename(s.hash);
                 }} />
             ) : (
               <button type="button" aria-pressed={open === s.hash} onClick={() => onOpen(s.hash)} className="mono"
+                ref={(el) => { if (el && refocus.current === s.hash) { refocus.current = null; el.focus(); } }}
                 style={{ border: 0, padding: "2px 4px", textAlign: "left", cursor: "pointer", overflowWrap: "anywhere",
                   background: open === s.hash ? "var(--accent-soft)" : "transparent", color: open === s.hash ? "var(--accent)" : "var(--ink)" }}>{s.name}</button>
             )}
@@ -163,7 +169,9 @@ function SavedList({ run, items, open, onOpen, onChanged }: {
 function TopList({ title, xs, target, onHover }: { title: string; xs: TopK[]; target: number; onHover: (i: number) => void }) {
   return (
     <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-      <span className="lbl dim" style={{ paddingBottom: 6 }}>{title}</span>
+      <span style={{ display: "flex", justifyContent: "space-between", gap: 8, paddingBottom: 6 }}>
+        <span className="lbl dim">{title}</span><span className="axis">bar = p · 0–1</span>
+      </span>
       <div className="rule-top">
         {xs.slice(0, 5).map((t) => (
           <div key={t.index} onMouseEnter={() => onHover(t.index)}
@@ -212,7 +220,7 @@ function ResultCard({ run, r, set }: { run: RunMeta; r: InterventionResult; set:
       </div>
       {r.truncated && <span className="lbl dim">Budget reached · {r.saved.length}/{r.downstream.length} downstream tensors saved; the graph still shows every Δ</span>}
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-        <a className="lbl chart-export" href={href(run.id, "graph", { iv: r.hash, color: "iv", set: setParam(set) })}>Graph · Intervention Δ →</a>
+        <a className="lbl chart-export" href={href(run.id, "graph", { node: op, iv: r.hash, color: "iv", set: setParam(set) })}>Graph · Intervention Δ →</a>
         {op && r.saved.includes(op)
           ? <a className="lbl chart-export" href={href(run.id, "tensors", { node: op, iv: r.hash, vs: "clean" })}>Clean vs intervened →</a>
           : <span className="lbl dim">No intervened tensor saved for {op}</span>}

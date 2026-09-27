@@ -13,7 +13,7 @@ import torch
 from test_jobs_m3 import follow
 from test_pipeline import Tiny
 
-from neurotome import cli
+from neurotome import __version__, cli
 from neurotome.graph import graph_view
 from neurotome.runs import RunManager
 from neurotome.store import RunStore
@@ -148,7 +148,7 @@ def test_http_capture(mgr):
     missing = c.post("/api/runs", json={"model": SPEC, "sample": {"kind": "upload", "upload_id": "nope.npy"}})
     assert missing.status_code == 400 and "upload the file again" in missing.json()["detail"]
     health = c.get("/api/health").json()
-    assert health["version"] == "0.1.0" and health["max_capture_mb"] is None
+    assert health["version"] == __version__ and health["max_capture_mb"] is None
     mgr.max_capture_bytes = 512 * MB
     assert c.get("/api/health").json()["max_capture_mb"] == 512
 

@@ -15,11 +15,12 @@ import { TokenStrip } from "./TokenStrip";
 const KINDS: [EditKind, string][] = [["zero", "Zero"], ["mean", "Mean"], ["resample", "Resample"], ["constant", "Constant"], ["scale", "Scale"], ["steer", "Steer"]];
 
 /** A seg control named `name`: one aria-pressed button per [value, text]. */
-function Seg<T extends string>({ name, value, options, onChange, disabled }: {
+function Seg<T extends string>({ name, value, options, onChange, disabled, grid }: {
   name: string; value: T; options: [T, string][]; onChange: (v: T) => void; disabled?: (v: T) => string | null;
+  grid?: boolean;   // 3 columns (the six edit kinds) instead of a row that wraps unevenly
 }) {
   return (
-    <div className="seg lbl" role="group" aria-label={name} style={{ alignSelf: "flex-start", flexWrap: "wrap" }}>
+    <div className={grid ? "seg seg-grid lbl" : "seg lbl"} role="group" aria-label={name} style={{ alignSelf: "flex-start", flexWrap: "wrap" }}>
       {options.map(([v, text]) => (
         <button key={v} type="button" aria-pressed={v === value} disabled={!!disabled?.(v)} title={disabled?.(v) ?? undefined}
           onClick={() => onChange(v)}>{text}</button>
@@ -102,7 +103,7 @@ export function EditForm({ run, op, onAdd }: { run: RunMeta; op: { id: string; s
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <Seg name="Edit kind" value={kind} options={KINDS} onChange={setKind}
+      <Seg name="Edit kind" grid value={kind} options={KINDS} onChange={setKind}
         disabled={(k) => (k === "steer" && n == null ? "Steering needs a (B, C, H, W), (B, T, D) or (B, D) tensor" : null)} />
       {kind === "mean" && <Row k="Over"><Seg name="Over" value={over} options={[["positions", "Positions"], ["runs", "Runs"]]} onChange={setOver} /></Row>}
       {kind === "resample" && (
@@ -144,7 +145,8 @@ export function EditForm({ run, op, onAdd }: { run: RunMeta; op: { id: string; s
       {axes.positions === "pixels" && (
         img ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <DotMatrix grid={img.dots} label="Position picker" pitch={Math.min(18, Math.floor(300 / Math.max(1, img.dots[0]?.length ?? 1)))}
+            <DotMatrix grid={img.dots} label="Position picker" pitch={Math.min(18, Math.floor(260 / Math.max(1, img.dots[0]?.length ?? 1)))}
+              x={{ from: 0, to: W - 1, label: "x" }} y={{ from: 0, to: H - 1, label: "y" }}
               selected={cellsOf(pixels, H, W, img.dots.length, img.dots[0]?.length ?? 0)}
               onPick={(r, c) => setPixels((p) => toggleCells(p, H, W, img.dots.length, img.dots[0]?.length ?? 0, r, c))}
               readout={(r, c, v) => `px (${cellSpan(H, img.dots.length, r)}, ${cellSpan(W, img.dots[0].length, c)}) · ${num(unscale(v, img.dots_range, img.cmap), 3)}`} />

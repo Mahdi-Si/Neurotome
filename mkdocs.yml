@@ -47,3 +47,5 @@ nav:
       - M2 · Tensor inspector: specs/m2.md
       - M3 · Attribution and trace: specs/m3.md
       - M4 · Hardening and release: specs/m4.md
+      - v0.2 · Sequences and LLMs: specs/v02.md
+      - v0.3 · Interventions: specs/v03.md

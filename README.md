@@ -9,8 +9,11 @@ tensor as maps, signals or projections. It also traces which parts of the model 
 | Tensors | Trace |
 |---|---|
 | ![Tensor inspector](docs/screenshots/tensors.png) | ![Attribution trace](docs/screenshots/trace.png) |
+| **Logit lens** | **Interventions** |
+| ![Logit lens on GPT-2](docs/screenshots/lens.png) | ![Steering GPT-2 with clean vs intervened generation](docs/screenshots/interventions.png) |
 
-> Status: **MVP**, in release preparation. The full pipeline works end to end. See the
+> Status: **0.3.0 release candidate**: the MVP plus sequences / LLMs (v0.2) and interventions (v0.3), in release
+> preparation. See the
 > [Getting started](docs/index.md) page, [docs/PLAN.md](docs/PLAN.md) for the MVP scope and roadmap, and
 > [docs/RELEASE.md](docs/RELEASE.md) for how a version reaches PyPI.
 
@@ -68,6 +71,7 @@ neurotome.open(lm, ids, tokenizer=tok) # token labels and, for a causal LM, the 
 neurotome capture torchvision:resnet18 --weights DEFAULT --image cat.jpg
 neurotome capture hf:gpt2 --weights DEFAULT --text "The cat sat on the"   # a text model (hf extra)
 neurotome capture py:examples.custom_model:build   # your own model (see examples/custom_model.py)
+neurotome capture py:examples.signal_model:build --sample rec01:0   # a dataset sample by its ref
 neurotome capture torchvision:resnet50 --modules layer3,layer4 --max-capture-mb 512   # selective, budgeted
 neurotome serve                                    # serves the built UI + API on :7070
 ```
@@ -131,9 +135,9 @@ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.g
 
 ## Trace
 
-- **Objective**: a logit (default: the top prediction) or an internal unit, i.e. one channel of a module output
-  summed over positions (`obj=<op>&ch=<c>` in the URL; `← Logits` goes back). Input map, node scores, merge shares
-  and the dominant path are all computed for that objective.
+- **Objective**: a logit (default: the top prediction) or an internal unit, i.e. one channel (a feature, for a token
+  tensor) of a module output summed over positions (`obj=<op>&ch=<c>` in the URL; `← Logits` goes back). Input map,
+  node scores, merge shares and the dominant path are all computed for that objective.
 - **Merge shares**: at `add` / `cat` / other merges an edge's share is that parent's grad × input *through the
   merge*, so the dominant path follows real flow.
 - **Layer attribution**: Layer IG or Layer conductance per channel of the selected node; pick a channel for its
@@ -174,6 +178,43 @@ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.g
   parameters: a module-level graph that stays small for big models (interventions edit module outputs; see
   [Architecture](docs/ARCHITECTURE.md) for the trade-offs).
 
+## Time series with a dataset
+
+A `py:` model module can bring its dataset, so any sample is analysed by its ref, with the raw signal shown next
+to the transformed model input (`examples/signal_model.py` is a small, synthetic worked example):
+
+```python
+OUTPUT_KIND = "values"          # a score per step, not logits: the output summary is top-5 by value, no softmax
+
+def build() -> nn.Module: ...   # forward(x: (1, T, C)) -> tensor, or a dict / tuple whose first tensor is the output
+
+def list_samples() -> list[dict]:        # cheap: the model is not built; may be thousands long (the UI filters)
+    return [{"ref": "rec01:0", "label": "segment 0 · 0–600 s", "group": "rec01"}, ...]
+
+def load_sample(ref: str) -> dict:       # one sample as your own data pipeline makes it (batch of 1)
+    return {"input": x,                  # required: a tensor or a tuple of tensors
+            "name": "rec01 · segment 0", "steps": ["Frame: 16 s windows every 8 s", ...], "info": {"recording": "rec01"},
+            "raw": {"fs": 4.0, "t0": 0.0, "time_label": "s from recording start",
+                    "channels": [{"name": "hr", "unit": "bpm", "values": hr}, ...]},
+            "blocks": [{"name": "hr · band power", "start": 0, "stop": 5, "labels": ["0.06–0.12 Hz", ...], "unit": "z"}],
+            "time": {"axis": 1, "step_s": 8.0, "t0": 8.0}}   # step i at t0 + i · step_s, on the raw clock
+```
+
+Pick `Dataset` in the Home form (it appears when the module lists samples; filter by ref, label or group), or run
+`neurotome capture py:examples.signal_model:build --sample rec01:0`. The Tensors tab's input node then shows the
+sample's info rows, one envelope plot per raw channel and one heatmap per block of the model input, all on the raw
+signal's clock, and the preprocessing steps. A module in another repository needs only to be importable: start the
+server with that repository on `PYTHONPATH` (`PYTHONPATH=/path/to/repo neurotome serve`, PowerShell
+`$env:PYTHONPATH = "C:\path\to\repo"`); only the model module is imported, never code from the runs folder.
+
+For a per-step output, `target_windows(index)` names the part of the input that step reads, in input steps:
+`[{"label": "step t40", "start": 40, "stop": 41, "blocks": None, "kind": "target"}, {"label": "pressure context",
+"start": 28, "stop": 40, "blocks": ["pressure · band power"], "kind": "context"}, …]` (`kind` target / context /
+horizon; Neurotome clips to the input). In the Trace view pick any step (number field or slider; `CATEGORIES` label
+each step), run attribution, and the map shows the step and its windows as bands, zooms `Around step`, and a table
+says how much of the attribution lies in each window; a cell or window opens its input values, `Show on input →`
+draws the step on the raw signal and the model input.
+
 ## Layout
 
 ```
@@ -204,7 +245,7 @@ elsewhere); the Makefile target is in brackets.
 | `cd backend && python -m pytest -q` | backend tests [`make test-backend`; `make test` adds the frontend] |
 | `cd backend && python -m ruff check .` | lint [`make lint`] |
 | `cd frontend && npm run typecheck && npm test` | frontend typecheck and vitest [`make test-frontend`] |
-| `cd frontend && npm run e2e` | builds the UI, starts `neurotome serve` (CPU, temp runs dir, free port) and runs the Playwright suite over the four views [`make e2e`]; first time: `npx playwright install chromium` |
+| `cd frontend && npm run e2e` | builds the UI, starts `neurotome serve` (CPU, temp runs dir, free port) and runs the Playwright suite over every view [`make e2e`]; first time: `npx playwright install chromium` |
 | `uv build backend` | sdist and wheel with the UI [`make wheel`, which also builds the UI and checks the wheel] |
 | `python scripts/bench.py` | benchmarks for the success criteria (ResNet-50 capture, tensor view p95, IG-32 on CPU) [`make bench`] |
 | `mkdocs serve` | docs site on http://127.0.0.1:8000 (`pip install -e "./backend[docs]"`); `mkdocs build --strict` [`make docs`] |
@@ -222,6 +263,7 @@ Releasing: [docs/RELEASE.md](docs/RELEASE.md).
 | `NEUROTOME_MAX_CAPTURE_MB` | `2048` | activation budget per run; later ops are recorded without tensors |
 | `NEUROTOME_MAX_LIVE_MODELS` | `2` | models (+ inputs) kept loaded for attribution; least recently used is evicted |
 | `NEUROTOME_NNSIGHT_PARAMS` | `1e9` | auto capture backend: NNsight (module outputs) above this many parameters |
+| `NEUROTOME_ALLOWED_HOSTS` | (empty) | extra host names to answer; other `Host` headers are refused (DNS-rebinding guard) |
 
 ## Built on
 

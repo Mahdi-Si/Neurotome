@@ -245,7 +245,7 @@ def test_labels():
     )
     assert label(steer, "p") == "Steer +4 × (run_0006 − run_0005, last) · p · all"
     neg = one(op="seq", kind="steer", alpha=-0.5, direction={"kind": "channel", "channel": 3})
-    assert label(neg, "p") == "Steer -0.5 × e_3 · p · all"
+    assert label(neg, "p") == "Steer −0.5 × e_3 · p · all"  # the client's minus sign (U+2212)
 
 
 def test_scope_and_kinds():
@@ -428,20 +428,43 @@ def test_tiny_two_edits(tiny):
         iv(mgr, run, [{"op": "conv2d_3_5", "kind": "zero"}], target=9)
 
 
-def test_dropout_cannot_edit(tmp_path):
+class Fork(nn.Module):
+    """lin's output feeds a second consumer before the dropout (so TorchLens credits it to lin, not to the
+    dropout, which returns the same object): editing lin is not editing the dropout."""
+
+    def __init__(self):
+        super().__init__()
+        self.lin, self.drop = nn.Linear(4, 8), nn.Dropout(0.1)
+        self.head, self.side = nn.Linear(8, 3), nn.Linear(8, 3)
+
+    def forward(self, x):
+        h = self.lin(x)
+        s = self.side(h)
+        return self.head(self.drop(h)) + s
+
+
+def test_dropout_edits_its_input(tmp_path):
+    """Eval dropout returns its input object, which TorchLens keeps: the edit moves to that input when the
+    dropout is its only consumer (the result is then exactly the edit), and is refused otherwise."""
     torch.manual_seed(0)
     mgr = RunManager(RunStore(tmp_path / "runs"))
     model = nn.Sequential(nn.Linear(4, 8), nn.Dropout(0.1), nn.Linear(8, 3))
     run = mgr.create_from_objects(model, torch.randn(1, 4))["id"]
     ir = mgr.store.ir(run)
     drop = next(o for o in ir["ops"] if o["type"] == "dropout")
+    res = iv(mgr, run, [{"op": drop["id"], "kind": "scale", "alpha": 0.5}])
+    ref = iv(mgr, run, [{"op": drop["parents"][0], "kind": "scale", "alpha": 0.5}])
+    assert res["delta_logit"] == pytest.approx(ref["delta_logit"], abs=1e-6) and res["delta_logit"] != 0
+    assert res["nodes"][drop["id"]]["rel"] == pytest.approx(0.5, abs=1e-6)
+    fork = mgr.create_from_objects(Fork(), torch.randn(1, 4))["id"]
+    ir = mgr.store.ir(fork)
+    drop = next(o for o in ir["ops"] if o["type"] == "dropout")
     with pytest.raises(ValueError) as e:
-        iv(mgr, run, [{"op": drop["id"], "kind": "zero"}])
+        iv(mgr, fork, [{"op": drop["id"], "kind": "zero"}])
     assert str(e.value) == (
         f"TorchLens cannot edit {drop['id']} (dropout): it returns its input unchanged in "
         f"eval mode. Edit its parent {drop['parents'][0]} instead."
     )
-    assert iv(mgr, run, [{"op": drop["parents"][0], "kind": "zero"}])["delta_logit"] != 0
 
 
 def test_resnet18_inplace(tmp_path):

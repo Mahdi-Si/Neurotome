@@ -1,15 +1,15 @@
 # Neurotome: MVP, roadmap and implementation plan
 
-*Version 0.1 · 22 September 2026*
+*Version 0.3 · 23 September 2026*
 
 Neurotome is a local web workbench for looking inside one PyTorch model on one input. You capture
 a single forward pass, browse the full computation graph and open any tensor as maps, signals or
 projections. You can then trace which parts of the model, and which parts of the input, drove a
 given output.
 
-This repository is the **v0.1 starter**. Every piece of the pipeline already works end to end,
-from capture to graph, tensor and attribution views, and the UI follows the look of the design
-mockups. The plan below takes that starter to a releasable MVP and then beyond.
+The MVP (M0–M4) and the v0.2 and v0.3 releases below are delivered; the first public release is **0.3.0**, in
+release preparation (see [Release](RELEASE.md)). The plan below records how the starter became that release, and the
+roadmap after it.
 
 ---
 
@@ -102,6 +102,8 @@ comparison, training-time monitoring, multi-user hosting, JAX and TensorFlow.
 
 Machine: 13th Gen Intel Core i7-13800H, 14 torch threads (20 logical CPUs), torch 2.14.0, Python 3.12.1, Windows 11.
 Four runs that day ranged 2.2–3.8 s, 165–206 ms and 4.0–4.2 s (other work shared the machine).
+Re-measured on the 0.3.0 release candidate (same machine and day, after v0.2 and v0.3): 2.82 s, 150 ms, 4.42 s;
+and after the 0.3.0 code review: 2.68 s, 182 ms, 3.89 s, all within budget.
 
 ## 6. Architecture (summary)
 
@@ -157,7 +159,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 - [x] Export: PNG of any chart (client-side), `.npy` of any slice (capped at 2²⁴ values, 413 beyond)
 - [x] M1 carry-over: picking an open module in the ModuleTree folds and selects the module itself, like search
 
-### M3 · Attribution and trace (≈2 weeks)
+### M3 · Attribution and trace (done, spec: `docs/specs/m3.md`)
 
 - [x] Per-node **layer** methods from Captum: LayerIntegratedGradients, LayerConductance, and NeuronConductance for a chosen channel
 - [x] Proper merge attribution: split flow at `add`/`cat` by each parent's contribution to the merge output, not the parents' own totals
@@ -167,7 +169,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 - [x] Activation patching v1: replace one node's output with a baseline and re-run (via TorchLens interventions)
 - [x] M3 notes: neuron conductance is computed directly (Σ over positions; Captum's `NeuronConductance` refuses aggregated neurons) and matches Captum per neuron; random-init models are seeded on load so a spec reloads to the captured weights; patch deltas skip ops whose tensor a later in-place op (`+=`, `ReLU(inplace)`) overwrote during replay
 
-### M4 · Hardening and release (≈1 week)
+### M4 · Hardening and release (done, spec: `docs/specs/m4.md`)
 
 - [x] Background job queue for captures: `POST /api/runs` returns 202 and a `capture` job (Load model, Build input, Trace, Save tensors i/N, Summarise) followed over SSE; Home shows the progress bar and Cancel, then opens the run. The CLI and `neurotome.open()` stay synchronous
 - [x] Capture budget UI and selective capture: "never cross" budget rule, Truncated / Selective banner in the graph and tensor views, dotted `∅` nodes without a tensor (stats still computed for every op), `modules` and a per-run budget in the form, the API and `neurotome capture --modules --max-capture-mb`
@@ -177,7 +179,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 - [x] Browser end-to-end tests (Playwright, `npm run e2e`, CI job) over the four views; `scripts/bench.py` for the success criteria (§5)
 - [x] Type-check hygiene: `pyrightconfig.json`, `pyright backend/neurotome` at 0 errors in CI, LF line endings
 
-**MVP total: about 6–7 weeks** after this starter.
+The MVP was estimated at 6–7 weeks after the starter; it is complete.
 
 ## 8. Roadmap after MVP
 
@@ -185,7 +187,7 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 |---|---|---|
 | **v0.2 (delivered, spec: docs/specs/v02.md)** | Sequences and LLMs | Token input box; Hugging Face models; attention-pattern viewer; logit lens; LayerIntegratedGradients on embeddings; NNsight capture backend for large models |
 | **v0.3 (delivered, spec: docs/specs/v03.md)** | Interventions | Zero/mean/resample ablation, activation patching and steering from the UI; before/after diff of every downstream node |
-| v0.4 | Scale | Streaming capture to chunked storage (zarr); selective capture during the trace (M4 selects what reaches disk); remote GPU server; optional NDIF backend for very large models |
+| v0.4 | Scale | Streaming capture to chunked storage (zarr); selective capture during the trace (M4 selects what reaches disk); float16 activation storage; bf16 / `device_map` loading for HF models over ~16 GB; remote GPU server; optional NDIF backend for very large models |
 | v0.5 | Comparison | Two samples or two checkpoints side by side; dataset-level channel statistics; float vs quantized error overlay |
 | v1.0 | Ecosystem | Jupyter widget; plugin API for custom tensor viewers and attribution methods; static shareable export; circuit-tracer import |
 
@@ -262,18 +264,20 @@ Estimates assume one engineer working full time. `[x]` = done in this starter.
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | TorchLens API churn (it changed between 2.x minors) | High | Pinned to `>=2.34,<2.35`; all calls live in `capture.py`; tests catch breakage; a forward-hook fallback adapter is possible (module outputs only) |
-| Memory blow-up on big models | High | Capture budget (already enforced); selective capture; float16 storage option; streaming to disk (v0.4) |
-| Unreadable graphs for large models | Medium | Depth collapsing (done), per-module expansion, search, minimap, worker layout |
+| Memory blow-up on big models | High | Never-cross capture budget and selective capture (M4); NNsight module capture above 1 B params (v0.2); float16 storage, bf16 loading and streaming to disk (v0.4) |
+| Unreadable graphs for large models | Medium | Depth collapsing, per-module expansion, search, minimap, worker layout (all done) |
 | Misleading attribution | Medium | Always label the method; show IG completeness Δ; method agreement panel; docs on caveats |
 | Arbitrary code execution from `py:` specs and pickles | Medium | Localhost-only by default; document it; safetensors-only mode for a hosted version |
-| ELK slow on huge graphs | Low–Medium | Web Worker, cached layouts, collapse by default above N nodes |
+| ELK slow on huge graphs | Low–Medium | Web Worker and cached layouts (M1, benchmarked to 2k nodes); graphs open collapsed at depth 2, which keeps real models small (measured: ResNet-50 173 nodes, DenseNet-121 85, ConvNeXt-T 34, EfficientNet-B0 28, ViT-B/16 24; "All" is the user's choice) |
 
 ## 10. Open decisions
 
 1. **Name and license.** Resolved: the name is **Neurotome** and the license is Apache-2.0 (matches TorchLens and Captum).
-2. **Hosted vs local-only.** The MVP is local. A hosted version needs sandboxing and auth; decide after v0.3.
+2. **Hosted vs local-only.** Open. The 0.3.0 release is local-only. A hosted version needs sandboxing, auth and a
+   safetensors-only model mode (no `py:` specs, no pickles); decide before v0.4's remote GPU server.
 3. **Second capture backend.** Resolved in v0.2: NNsight (module outputs), chosen explicitly or automatically for large models; `torch.export` stays an option for static graphs.
-4. **Dark mode in MVP or later?** The tokens are ready for it; charts need re-validation.
+4. **Dark mode in MVP or later?** Resolved in M4: light and dark themes, with contrast checked in tests (see
+   [Design](DESIGN.md)).
 
 ## 11. Getting started
 

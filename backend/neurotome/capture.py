@@ -41,7 +41,7 @@ import torch
 
 from .errors import NO_GRAD, TraceError
 from .graph import strip_call
-from .interventions import diff_row
+from .interventions import channel_axis, diff_row, per_channel
 from .jobs import Progress
 from .store import RunStore
 from .tensors import safe_range
@@ -169,6 +169,7 @@ def _out(value: Any) -> torch.Tensor:
     return cast(torch.Tensor, _first_tensor(value))
 
 
+@torch.enable_grad()  # a no_grad caller (neurotome.open) records fused paths: op ids intervene never sees
 def capture(
     model: torch.nn.Module,
     inputs: Any,
@@ -289,7 +290,8 @@ def op_gradients(
     """Re-trace with gradients and return per-op gradient × activation for one objective.
 
     ``objective`` None: back-propagate ``logits[0, target]`` (target None -> argmax).
-    ``objective`` ``{"op": op_id, "channel": c}``: back-propagate ``first_tensor(op.out)[0, c].sum()``;
+    ``objective`` ``{"op": op_id, "channel": c}``: back-propagate Σ of channel c of sample 0 of the op's first
+    tensor (features for (B, T, D), else axis 1: ``interventions.channel_axis``);
     ops downstream of the unit get no gradient and so no score.
 
     Returns ``{"target", "logit", "value", "scores": {op_id: signed sum(act*grad)},
@@ -316,9 +318,10 @@ def op_gradients(
         out = _first_tensor(_safe(lambda: unit.out)) if unit is not None else None
         if out is None:
             raise ValueError(f"Unknown op {op_id}")
-        if out.dim() < 2 or not 0 <= c < out.shape[1]:
+        ax = channel_axis(out.dim())
+        if out.dim() < 2 or not 0 <= c < out.shape[ax]:
             raise ValueError(f"Channel {c} out of range for {op_id} with shape {list(out.shape)}")
-        target, root = None, out[0, c].sum()
+        target, root = None, out.select(ax, c)[0].sum()
     if not root.requires_grad:
         raise ValueError(NO_GRAD)
     with warnings.catch_warnings():
@@ -332,11 +335,11 @@ def op_gradients(
         grad = _first_tensor(_safe(lambda op=op: op.grad))
         if act is None or grad is None or act.shape != grad.shape or not act.is_floating_point():
             continue
-        gxa = (act.detach() * grad.detach()).to(torch.float32)
+        gxa = act.detach().float() * grad.detach().float()  # float32 first: a half product overflows
         oid = by_obj[id(op)]
         scores[oid] = float(gxa.sum())
-        if gxa.dim() >= 3:  # (B, C, ...) -> per channel
-            channel_scores[oid] = gxa[0].flatten(1).sum(1).tolist()
+        if gxa.dim() >= 3:  # (B, C, ...) / (B, T, D) -> per channel
+            channel_scores[oid] = per_channel(gxa[0]).tolist()
     return {
         "target": target,
         "logit": logit,
@@ -368,18 +371,29 @@ def _merge(op, every: dict[str, Any], by_obj: dict[int, str]) -> dict[str, float
     """Each visible parent's grad × input through ``op``: re-call op.func on cloned parent leaves."""
     grad = _first_tensor(_safe(lambda: op.grad))
     parents = {k: every[label] for k, label in op.parent_arg_positions["args"].items()}
-    if grad is None or len({by_obj[id(p)] for p in parents.values() if id(p) in by_obj}) < 2:
+    kw_parents = {k: every[label] for k, label in op.parent_arg_positions["kwargs"].items()}
+    every_parent = [*parents.values(), *kw_parents.values()]
+    if grad is None or len({by_obj[id(p)] for p in every_parent if id(p) in by_obj}) < 2:
         return None
     leaves: dict[str, torch.Tensor] = {}
-    slots: dict[int, Any] = {}
-    for k, p in parents.items():
+
+    def value(p) -> torch.Tensor:
         t = _out(p.out).detach()
         if id(p) in by_obj:  # visible parent -> one leaf per op; buffers stay constants
             t = leaves.setdefault(by_obj[id(p)], t.clone().requires_grad_(True)).clone()  # in-place funcs
+        return t
+
+    slots: dict[int, Any] = {}
+    for k, p in parents.items():
+        t = value(p)
         if isinstance(k, tuple):  # (i, j): element j of a list at position i, e.g. cat([a, b])
             slots.setdefault(k[0], {})[k[1]] = t
         else:
             slots[k] = t
+    # tensor kwargs (sdpa's attn_mask): a nested one or a parameter kwarg is not recorded -> skipped
+    kwargs = {**op.non_tensor_kwargs, **{k: value(p) for k, p in kw_parents.items()}}
+    if any(isinstance(k, tuple) for k in kw_parents) or len(kwargs) != op.num_kwargs:
+        return None
     rest = iter(op.non_tensor_pos_args)
     args = [
         ([v for _, v in sorted(slots[i].items())] if isinstance(slots[i], dict) else slots[i])
@@ -390,10 +404,10 @@ def _merge(op, every: dict[str, Any], by_obj: dict[int, str]) -> dict[str, float
     if next(rest, rest) is not rest:
         return None
     with torch.enable_grad():
-        y = _out(op.func(*args, **op.non_tensor_kwargs))
+        y = _out(op.func(*args, **kwargs))
         grads = torch.autograd.grad(y, list(leaves.values()), grad.to(y.dtype), allow_unused=True)
     return {
-        pid: 0.0 if g is None else float((g.detach() * leaf.detach()).float().sum())
+        pid: 0.0 if g is None else float((g.detach().float() * leaf.detach().float()).sum())
         for (pid, leaf), g in zip(leaves.items(), grads, strict=True)
     }
 
@@ -414,7 +428,7 @@ def intervene(
     # ponytail: two full traces; store raw_index in the IR at capture to skip the clean one for big models
     model.eval()
     clean = _visible_ops(_trace_or_raise(model, inputs))
-    by_obj, _ = _id_maps(clean)
+    by_obj, clean_labels = _id_maps(clean)
     ids = [by_obj[id(o)] for o in clean]
     raw = {by_obj[id(o)]: o.raw_index for o in clean}
     down = set(downstream)
@@ -424,32 +438,47 @@ def intervene(
         if op not in raw:
             raise ValueError(f"Unknown op {op}")
         fns.setdefault(op, []).append(fn)
-    returned: dict[str, torch.Tensor] = {}
 
-    def make(op: str):
-        def hook(out, *, hook):  # TorchLens passes the hook spec keyword-only
-            if not torch.is_tensor(out):
-                raise ValueError(f"{op} returns several tensors; edit one of its consumers")
-            new = out
-            for fn in fns[op]:
-                new = fn(new)
-            if tuple(new.shape) != tuple(out.shape):
-                raise ValueError(f"Edit of {op} changed its shape {list(out.shape)} -> {list(new.shape)}")
-            returned[op] = new.detach().clone()  # a later in-place op may change the live tensor
-            return new
+    def run(fns: dict[str, list]) -> tuple[dict[str, Any], dict[str, str], list[str]]:
+        """One edited trace: (ops by id, label map, the edited ops whose edit TorchLens did not keep)."""
+        returned: dict[str, torch.Tensor] = {}
 
-        return hook
+        def make(op: str):
+            def hook(out, *, hook):  # TorchLens passes the hook spec keyword-only
+                if not torch.is_tensor(out):
+                    raise ValueError(f"{op} returns several tensors; edit one of its consumers")
+                new = out
+                for fn in fns[op]:
+                    new = fn(new)
+                if tuple(new.shape) != tuple(out.shape):
+                    raise ValueError(f"Edit of {op} changed its shape {list(out.shape)} -> {list(new.shape)}")
+                returned[op] = new.detach().clone()  # a later in-place op may change the live tensor
+                return new
 
-    hooks = {raw[op]: make(op) for op in fns}
-    edited = _visible_ops(_trace_or_raise(model, inputs, intervene=lambda ctx: hooks.get(ctx.raw_index)))
-    by_obj2, by_label = _id_maps(edited)
-    if [by_obj2[id(o)] for o in edited] != ids:
-        raise ValueError("The intervention changed the model's control flow; TorchLens cannot align the ops")
-    ops = {by_obj2[id(o)]: o for o in edited}
-    for op in fns:
-        rec = _first_tensor(_safe(lambda op=op: ops[op].out))
-        if op not in returned or rec is None or not _same(rec.detach(), returned[op]):
-            raise ValueError(_cannot_edit(op, ops[op], by_label))
+            return hook
+
+        hooks = {raw[op]: make(op) for op in fns}
+        edited = _visible_ops(_trace_or_raise(model, inputs, intervene=lambda ctx: hooks.get(ctx.raw_index)))
+        by_obj2, by_label = _id_maps(edited)
+        if [by_obj2[id(o)] for o in edited] != ids:
+            raise ValueError(
+                "The intervention changed the model's control flow; TorchLens cannot align the ops"
+            )
+        ops = {by_obj2[id(o)]: o for o in edited}
+        lost = [op for op in fns if op not in returned or not _kept(ops[op], returned[op])]
+        return ops, by_label, lost
+
+    ops, by_label, lost = run(fns)
+    if lost:  # an op returning its input object (eval dropout): edit that input instead when it is the same
+        clean_ops = {by_obj[id(o)]: o for o in clean}
+        moved = {op: _passthrough_parent(op, clean_ops, clean_labels) for op in lost}
+        if bad := next((op for op in lost if moved[op] is None), None):
+            raise ValueError(_cannot_edit(bad, ops[bad], by_label))
+        for op in lost:  # the parent runs first, so its own edits come first
+            fns[cast(str, moved[op])] = fns.get(cast(str, moved[op]), []) + fns.pop(op)
+        ops, by_label, lost = run(fns)
+        if lost:
+            raise ValueError(_cannot_edit(lost[0], ops[lost[0]], by_label))
     nodes, stats, after = {}, {}, {}
     for op, b in before.items():
         a = _numpy(ops[op])
@@ -458,7 +487,7 @@ def intervene(
         nodes[op], stats[op] = diff_row(b, a), tensor_stats(a)
         if op in keep:
             after[op] = a
-    out_op = next(o for o in edited if o.is_output)
+    out_op = next(o for o in ops.values() if o.is_output)
     return {"nodes": nodes, "stats": stats, "after": after, "logits_after": _out(out_op.out).detach()}
 
 
@@ -477,6 +506,26 @@ def _cannot_edit(op_id: str, op, by_label: dict[str, str]) -> str:
         f"TorchLens cannot edit {op_id} ({_safe(lambda: op.func_name, op.layer_type)}): it returns its input "
         f"unchanged in eval mode. Edit its parent {parent} instead."
     )
+
+
+def _kept(op, returned: torch.Tensor) -> bool:
+    rec = _first_tensor(_safe(lambda: op.out))
+    return rec is not None and _same(rec.detach(), returned)
+
+
+def _passthrough_parent(op_id: str, ops: dict[str, Any], by_label: dict[str, str]) -> str | None:
+    """The parent an op passes through unchanged (eval-mode dropout returns its input object), when the op is
+    that parent's only consumer: editing the parent is then exactly editing the op. Else None."""
+    op = ops[op_id]
+    parents = [by_label[p] for p in (_safe(lambda: op.parents, []) or []) if p in by_label]
+    if len(parents) != 1:
+        return None
+    parent = ops[parents[0]]
+    kids = {by_label[c] for c in (_safe(lambda: parent.children, []) or []) if c in by_label}
+    a, b = _first_tensor(_safe(lambda: op.out)), _first_tensor(_safe(lambda: parent.out))
+    if kids != {op_id} or a is None or b is None or not _same(a.detach(), b.detach()):
+        return None
+    return parents[0]
 
 
 def _same(a: torch.Tensor, b: torch.Tensor) -> bool:

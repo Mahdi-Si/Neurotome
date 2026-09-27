@@ -47,3 +47,22 @@ test("Norm colour mode shows its legend", async ({ page }) => {
   await expect(page).toHaveURL(/color=norm/);
   await expect(page.getByText(/^RMS = /)).toBeVisible();
 });
+
+test("the right panel widens by dragging its edge, keeps the width, and resets on double-click", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto(graph("depth=1"));
+  const edge = page.getByRole("separator", { name: "Resize panel" });
+  await expect(edge).toHaveAttribute("aria-valuenow", "400");
+  const box = (await edge.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 - 150, box.y + 200, { steps: 5 });
+  await page.mouse.up();
+  await expect(edge).toHaveAttribute("aria-valuenow", "550");
+  await page.reload();
+  await expect(edge).toHaveAttribute("aria-valuenow", "550");
+  await edge.press("ArrowRight");
+  await expect(edge).toHaveAttribute("aria-valuenow", "526");
+  await edge.dblclick();
+  await expect(edge).toHaveAttribute("aria-valuenow", "400");
+});

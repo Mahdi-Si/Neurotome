@@ -15,8 +15,10 @@ Layout of one run::
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,17 @@ PREVIEW = "input_preview.png"
 
 def safe_name(op_id: str) -> str:
     return _SAFE.sub("_", op_id)
+
+
+def _retry(fn: Any, tries: int = 20) -> Any:
+    """``fn()``, retried while Windows refuses a file that another thread is reading or replacing."""
+    for i in range(tries):
+        try:
+            return fn()
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.005 * (i + 1))
 
 
 class RunStore:
@@ -64,25 +77,37 @@ class RunStore:
 
     def list_runs(self) -> list[dict[str, Any]]:
         out = []
-        for d in sorted(self.root.glob("run_*"), reverse=True):
+        # numeric order: run_10000 is newer than run_9999
+        for d in sorted(self.root.glob("run_*"), key=lambda d: (len(d.name), d.name), reverse=True):
             meta = d / "meta.json"
             if meta.exists():
-                out.append(json.loads(meta.read_text()))
+                out.append(json.loads(_retry(meta.read_text)))
         return out
 
     # ---- json blobs -------------------------------------------------------
+    def _mkdirs(self, run_id: str, path: Path) -> None:
+        """Create ``path``'s folders inside the run folder, never the run folder itself: a job that ends after
+        its run was deleted fails (FileNotFoundError) instead of leaving a folder without meta.json."""
+        d = self.run_dir(run_id)
+        for part in path.parent.relative_to(d).parts:
+            d = d / part
+            d.mkdir(exist_ok=True)
+        if not d.is_dir():
+            raise FileNotFoundError(f"Run {run_id} was deleted")
+
     def write_json(self, run_id: str, name: str, data: Any) -> None:
         path = self.run_dir(run_id) / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        self._mkdirs(run_id, path)
+        # one temporary file per writer: two threads writing one cache file never share it
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(data, separators=(",", ":")))
-        tmp.replace(path)
+        _retry(lambda: tmp.replace(path))
 
     def read_json(self, run_id: str, name: str) -> Any:
         path = self.run_dir(run_id) / name
         if not path.exists():
             raise KeyError(f"{run_id}/{name}")
-        return json.loads(path.read_text())
+        return json.loads(_retry(path.read_text))
 
     def meta(self, run_id: str) -> dict[str, Any]:
         return self.read_json(run_id, "meta.json")
@@ -103,7 +128,7 @@ class RunStore:
 
     def save_tensor(self, run_id: str, op_id: str, array: np.ndarray, iv: str | None = None) -> int:
         path = self.tensor_path(run_id, op_id, iv)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        self._mkdirs(run_id, path)
         np.save(path, np.ascontiguousarray(array, dtype=np.float32))
         return path.stat().st_size
 

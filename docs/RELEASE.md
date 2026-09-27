@@ -36,6 +36,7 @@ cd frontend && npm run e2e                                   # browser end-to-en
 
 Then try, in the browser, on a clean runs dir:
 
+- [ ] a GPU run (`neurotome serve --device cuda`): capture, IG and an intervention (CI is CPU-only)
 - [ ] a torchvision model with pretrained weights and an uploaded image (`torchvision:resnet50`, `DEFAULT`, a photo);
       the top prediction on Home makes sense
 - [ ] a `py:` model (`py:examples.custom_model:build`, and one of your own)
@@ -44,8 +45,18 @@ Then try, in the browser, on a clean runs dir:
 - [ ] cancel a capture while it runs; a bad spec shows a readable error
 - [ ] each view: Graph (fold, search, keyboard, colour modes, minimap), Tensors (pixel pick, slices, compare,
       PNG / `.npy` export), Trace (IG with completeness Δ, a unit objective)
-- [ ] the jobs: IG, layer IG and conductance, neuron conductance, method agreement, patch & re-run, each with
-      progress and `Cancel`
+- [ ] the jobs: IG, layer IG and conductance, neuron conductance, method agreement, intervene, generate, lens, each
+      with progress and `Cancel`
+- [ ] a text model (`hf:gpt2`, `DEFAULT`, `Text` sample): token labels in Tensors, a softmax op as attention heads,
+      the Lens tab, the IG token strip in Trace; a non-LM run shows `Lens` disabled
+- [ ] an image `hf:` model (`hf:google/vit-base-patch16-224`, `DEFAULT`, a photo): a sensible top prediction
+- [ ] the NNsight backend (`Capture` = `NNsight · module outputs` on `hf:gpt2`): the `Modules` banner, a module-level
+      graph, an intervention on a module node
+- [ ] interventions: compose a set in the Interventions tab (zero with a channel scope, steer), run it, open
+      `Graph · Intervention Δ →` and `Clean vs intervened →`, rename and delete a saved one; from the graph
+      inspector, `Add to set` → `Run set (1)`; resample / mean over runs with two runs of the same model
+- [ ] generation on `hf:gpt2`: steer a block output, `Generate`, clean vs intervened continuations and the per-step
+      table
 - [ ] dark theme (toggle, reload keeps it, charts and canvases redraw), and a quick look with Windows high contrast
 - [ ] the wheel installed in a clean venv: `pip install backend/dist/*.whl`, `neurotome serve`, capture a run
 - [ ] `neurotome.open(model, x, block=False)` from a notebook
@@ -54,8 +65,9 @@ Sign-off is the maintainer's explicit note (issue comment or chat) that the demo
 
 ## 4. Tag → PyPI (only after the maintainer's explicit green light)
 
-1. Bump `neurotome.__version__` in `backend/neurotome/__init__.py` (the only version source; the package version is
-   dynamic) and commit.
+1. Check that `neurotome.__version__` in `backend/neurotome/__init__.py` (the only version source; the package
+   version is dynamic) is the version you release (`0.3.0` for the first release, already set); for a later release
+   bump it, and `frontend/package.json` with `npm version X.Y.Z --no-git-tag-version`, and commit.
 2. One-time PyPI setup: on pypi.org add a **trusted publisher** (pending publisher for a new project) with project
    `neurotome`, owner and repository of the GitHub repo, workflow `release.yml`, environment `pypi`. No API token
    is stored anywhere.
@@ -76,16 +88,16 @@ Sign-off is the maintainer's explicit note (issue comment or chat) that the demo
 
 ## Recorded local checks
 
-**Wheel check, 23 September 2026** (Windows 11, Python 3.12.1, uv 0.11.29, Node 24):
+**Wheel check, 23 September 2026, 0.3.0 release candidate** (Windows 11, Python 3.12.1, uv 0.11.29, Node 24):
 
 ```text
 $ cd frontend && npm run build
 $ uv build backend
-Successfully built backend\dist\neurotome-0.1.0.tar.gz
-Successfully built backend\dist\neurotome-0.1.0-py3-none-any.whl
+Successfully built backend\dist\neurotome-0.3.0.tar.gz
+Successfully built backend\dist\neurotome-0.3.0-py3-none-any.whl
 $ python scripts/check_wheel.py "backend/dist/*.whl" --sdist "backend/dist/*.tar.gz" --install
-ok    wheel neurotome-0.1.0-py3-none-any.whl
-ok    sdist neurotome-0.1.0.tar.gz
+ok    wheel neurotome-0.3.0-py3-none-any.whl
+ok    sdist neurotome-0.3.0.tar.gz
 ok    install + serve (clean venv, CPU torch)
 ```
 

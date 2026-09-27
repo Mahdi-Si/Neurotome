@@ -2,7 +2,7 @@
 import { fixed } from "./format";
 import { cellOf, cellStart } from "./tensorState";
 import { showToken } from "./tokens";
-import type { GenerationResult, GraphNode, RunMeta, TopK } from "./types";
+import type { GenerationResult, GraphNode, GraphView, RunMeta, TopK } from "./types";
 
 type Px = [number, number];
 
@@ -44,6 +44,40 @@ export function genReadout(res: GenerationResult, i: number): string {
 export function sameModelRuns(runs: RunMeta[], run: RunMeta): RunMeta[] {
   if (run.model.spec == null) return [];
   return [run, ...runs.filter((r) => r.id !== run.id && r.model.spec === run.model.spec && r.model.weights === run.model.weights)];
+}
+
+/** Module sites as the server's edit labels name them (`runs._path`), from the full-depth graph (every op a node):
+ * `path` maps an op to the innermost module call whose output it is (`addr`, `addr@n` after the first call), and
+ * `op` maps a module node id (`m:<addr>:<n>`) to that output op. A leaf module call is an op node whose path is the
+ * module address (its n-th node is call n); a multi-op call is a group, whose output is its last member with an
+ * edge leaving the group (mirrors `graph.module_sites`). */
+export function moduleSites(view: GraphView): { path: Map<string, string>; op: Map<string, string> } {
+  const path = new Map<string, string>(), op = new Map<string, string>();
+  const parent = new Map(view.groups.map((g) => [g.id, g.parent]));
+  const chain = (g: string | null) => { const out: string[] = []; for (; g; g = parent.get(g) ?? null) out.push(g); return out; };
+  const groupsOf = new Map(view.nodes.map((n) => [n.id, chain(n.group)]));
+  const targets = new Map<string, string[]>();
+  for (const e of view.edges) targets.set(e.source, [...(targets.get(e.source) ?? []), e.target]);
+  const exit = new Map<string, GraphNode>();   // group id → its last member with an edge leaving it
+  const leafCalls = new Map<string, number>();
+  const at = (addr: string, n: number) => addr + (n > 1 ? `@${n}` : "");
+  for (const n of view.nodes) {
+    for (const g of groupsOf.get(n.id)!)
+      if ((targets.get(n.id) ?? []).some((t) => !groupsOf.get(t)?.includes(g))) exit.set(g, n);
+    if (n.kind === "op" && n.path !== n.id) {
+      const k = (leafCalls.get(n.path) ?? 0) + 1;
+      leafCalls.set(n.path, k);
+      path.set(n.output_op, at(n.path, k));
+      op.set(`m:${n.path}:${k}`, n.output_op);
+    }
+  }
+  for (const [g, n] of exit) op.set(`m:${g.slice(2)}`, n.output_op);
+  for (const n of view.nodes) {
+    if (path.has(n.output_op)) continue;
+    const g = groupsOf.get(n.id)!.find((x) => exit.get(x) === n);
+    if (g) { const call = g.slice(2), i = call.lastIndexOf(":"); path.set(n.output_op, at(call.slice(0, i), Number(call.slice(i + 1)))); }
+  }
+  return { path, op };
 }
 
 /** A node whose output can be edited: not an input / output, float dtype (unknown dtype on old runs passes). */

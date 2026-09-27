@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { LinePlot, Readout, pngName } from "../components/charts";
 import { JobProgress } from "../components/JobProgress";
 import { TopBar } from "../components/TopBar";
+import { useSideWidth } from "../components/SideResize";
 import { exportSvg, fileName } from "../lib/exportPng";
 import { fixed, num } from "../lib/format";
 import { useJob } from "../lib/jobs";
@@ -71,7 +72,9 @@ export function LensViewPage({ run, route }: { run: RunMeta; route: Route }) {
 }
 
 function LensBody({ run, res, s, set }: { run: RunMeta; res: LensResult; s: LensState; set: (p: Partial<LensState>) => void }) {
+  const [sideW, sideHandle] = useSideWidth("lens", 400);
   const ref = useRef<SVGSVGElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<[number, number] | null>(null);
   const [clicked, setClicked] = useState<number | null>(null);   // layer of the last clicked cell
   const rows = res.layers.length, cols = res.tokens.length;
@@ -79,6 +82,11 @@ function LensBody({ run, res, s, set }: { run: RunMeta; res: LensResult; s: Lens
   const [tl, tj] = hover ?? [clicked ?? rows - 1, j];
   const alpha = (l: number, c: number) => Math.min(1, Math.max(0, s.mode === "top" ? res.top[l][c][0]?.prob ?? 0 : res.target_prob[l][c]));
   const topk = res.top[tl][tj];
+  // the grid scrolls sideways: keep the selected column (by default the last) in view
+  useEffect(() => {
+    const el = box.current, x0 = HEAD_W + j * COL;
+    if (el && (x0 < el.scrollLeft || x0 + COL > el.scrollLeft + el.clientWidth)) el.scrollLeft = x0 - (el.clientWidth - COL) / 2;
+  }, [j]);
   const exportGrid = async () => { if (ref.current) await exportSvg(ref.current, pngName(fileName([run.id, "lens", s.mode], "png"), "Logit lens")); };
 
   return (
@@ -87,11 +95,11 @@ function LensBody({ run, res, s, set }: { run: RunMeta; res: LensResult; s: Lens
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
           <h1 style={{ fontSize: 26 }}>Logit lens</h1>
           <span className="lbl dim">
-            {rows} layers × {cols} positions{res.pos0 ? ` · from pos ${res.pos0}` : ""} · {s.mode === "top" ? "fill = top-1 prob" : `fill = p("${showToken(res.target.token)}") · #rank`}
+            {rows} layers ({shortLayer(res.layers[0])} … {shortLayer(res.layers[rows - 1])}) × {cols} positions ({res.pos0}–{res.pos0 + cols - 1}) · {s.mode === "top" ? "fill = top-1 prob" : `fill = p("${showToken(res.target.token)}") · #rank`}
           </span>
         </div>
         <div style={card}>
-          <div className="scroll" style={{ overflowX: "auto" }}>
+          <div ref={box} className="scroll" style={{ overflowX: "auto" }}>
             <svg ref={ref} width={HEAD_W + cols * COL + 1} height={TOP + rows * ROW + 1} role="img" aria-label="Logit lens"
               onMouseLeave={() => setHover(null)} style={{ display: "block" }}>
               {res.tokens.map((tk, c) => (
@@ -121,7 +129,8 @@ function LensBody({ run, res, s, set }: { run: RunMeta; res: LensResult; s: Lens
           <Readout text={hover ? lensReadout(res, hover[0], hover[1]) : null} label="Logit lens" onExport={exportGrid} />
         </div>
       </section>
-      <aside className="panel scroll" style={{ width: 360, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+      {sideHandle}
+      <aside className="panel scroll" style={{ width: sideW, flexShrink: 0, borderLeft: "1px solid var(--line)", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span className="num" style={{ fontSize: 24, fontWeight: 500, letterSpacing: "-0.03em" }}>Position {res.pos0 + j} · "{showToken(res.tokens[j])}"</span>
           <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -134,7 +143,7 @@ function LensBody({ run, res, s, set }: { run: RunMeta; res: LensResult; s: Lens
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
             <span className="lbl">Target across layers</span><span className="lbl dim">"{showToken(res.target.token)}" · #{res.target.id}</span>
           </div>
-          <LinePlot values={res.target_prob.map((r) => r[j])} xLabel="layer" labels={res.layers.map(shortLayer)} mark={clicked}
+          <LinePlot values={res.target_prob.map((r) => r[j])} domain={[0, 1]} xLabel="layer" yLabel="p" labels={res.layers.map(shortLayer)} mark={clicked}
             exportName={fileName([run.id, "lens", "target", `pos${res.pos0 + j}`], "png")} />
           <div className="rule-top">
             {res.layers.map((name, l) => (
@@ -147,7 +156,7 @@ function LensBody({ run, res, s, set }: { run: RunMeta; res: LensResult; s: Lens
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-            <span className="lbl">Top-{res.k} at {shortLayer(res.layers[tl])}</span><span className="lbl dim">pos {res.pos0 + tj}</span>
+            <span className="lbl">Top-{res.k} at {shortLayer(res.layers[tl])}</span><span className="lbl dim">pos {res.pos0 + tj} · bar = p 0–1</span>
           </div>
           <div className="rule-top">
             {topk.map((c) => (

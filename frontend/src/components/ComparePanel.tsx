@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { headReadout } from "../lib/attentionState";
 import { fileName } from "../lib/exportPng";
 import { displayName, num, pct, shapeShort } from "../lib/format";
-import { cellOf, cellPixel, cellSpan, sameShape, sharedRange, unscale } from "../lib/tensorState";
+import { cellOf, cellPixel, cellSpan, sameShape, seqFactor, sharedRange, unscale } from "../lib/tensorState";
 import type { Cmap, GraphNode, Norm, RunMeta, Stats, TensorView } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
 import { DivergingBars, DotMatrix, HeatCanvas, Histogram, LinePlot } from "./charts";
@@ -54,7 +54,7 @@ export function ComparePanel({ run, a, b, channel, pixel, norm, cmap, onPixel }:
                 ))}
               </div>
               <span className="lbl">Δ distribution</span>
-              <Histogram counts={d.hist.counts} range={d.hist.range} height={70} exportName={fileName([run.id, a.node.output_op, b.node.output_op, b.iv ?? a.iv, "delta-hist"], "png").slice(0, -4)} />
+              <Histogram counts={d.hist.counts} range={d.hist.range} height={70} xLabel="Δ" exportName={fileName([run.id, a.node.output_op, b.node.output_op, b.iv ?? a.iv, "delta-hist"], "png").slice(0, -4)} />
             </>
           )}
         </div>
@@ -82,33 +82,36 @@ function Side({ side: { tag, node, stats: st }, t, error, range, onPixel, ex, st
         return (
           <>
             <span className="lbl dim">Channel c{t.channel} · @ ({py}, {px})</span>
-            <DotMatrix grid={t.dots} signed={t.cmap === "div"} pitch={Math.min(18, Math.floor(260 / Math.max(1, cols)))}
+            <DotMatrix grid={t.dots} signed={t.cmap === "div"} pitch={Math.min(18, Math.floor(220 / Math.max(1, cols)))}
               label={`${tag} channel ${t.channel} dot matrix`} exportName={ex("dots")}
+              x={{ from: 0, to: t.width - 1, label: "x" }} y={{ from: 0, to: t.height - 1, label: "y" }}
               mark={[cellOf(t.height, rows, py), cellOf(t.width, cols, px)]}
               onPick={(r, c) => onPixel(cellPixel(t.height, rows, r), cellPixel(t.width, cols, c))}
               readout={(r, c, v) => `px (${cellSpan(t.height, rows, r)}, ${cellSpan(t.width, cols, c)}) · ${num(unscale(v, t.dots_range, t.cmap), 3)}`} />
             <span className="lbl dim">Row {t.profile.row} profile</span>
-            <LinePlot values={t.profile.values} xLabel="col" height={80} exportName={ex("profile")} domain={range ?? undefined}
+            <LinePlot values={t.profile.values} len={t.width} xLabel="col" height={80} exportName={ex("profile")} domain={range ?? undefined}
               mark={cellOf(t.width, t.profile.values.length, px)} />
           </>
         );
       })()}
       {t?.kind === "sequence" && (
-        <div style={{ border: "1px solid var(--line)" }}>
-          <HeatCanvas grid={t.heatmap} signed style={{ height: 220, imageRendering: "pixelated" }} label={`${tag} token by feature heatmap`}
-            exportName={ex("heatmap")} readout={(r, c, v) => `cell (${r}, ${c}) · ${num(t.scale ? unscale(v, t.scale, "div") : v, 3)}`} />
+        <div>
+          <HeatCanvas grid={t.heatmap} signed style={{ height: 220, imageRendering: "pixelated", border: "1px solid var(--line)" }} label={`${tag} token by feature heatmap`}
+            x={{ from: 0, to: t.features - 1, label: "feature" }} y={{ from: 0, to: t.tokens - 1, label: "token" }}
+            exportName={ex("heatmap")} readout={(r, c, v) => { const k = seqFactor(t); return `cell (${r}, ${c}) · ${k == null ? `rel ${num(v, 3)}` : num(v * k, 3)}`; }} />
         </div>
       )}
       {t?.kind === "attention" && (
         <>
           <span className="lbl dim">Head {t.head} · max {num(t.full.max, 3)}</span>
-          <div style={{ border: "1px solid var(--line)" }}>
-            <HeatCanvas grid={t.full.map} style={{ aspectRatio: "1", imageRendering: "pixelated" }} label={`${tag} head ${t.head} attention`}
+          <div>
+            <HeatCanvas grid={t.full.map} style={{ aspectRatio: "1", imageRendering: "pixelated", border: "1px solid var(--line)" }} label={`${tag} head ${t.head} attention`}
+              x={{ from: 0, to: t.keys - 1, label: "key" }} y={{ from: 0, to: t.queries - 1, label: "query" }}
               exportName={ex("attention")} readout={(r, c, v) => headReadout(t, r, c, v, null)} />
           </div>
         </>
       )}
-      {t?.kind === "vector" && <DivergingBars values={t.values} height={140} xLabel="index" exportName={ex("signal")}
+      {t?.kind === "vector" && <DivergingBars values={t.values} len={t.length} height={140} xLabel="index" exportName={ex("signal")}
         max={range ? Math.max(Math.abs(range[0]), Math.abs(range[1])) : undefined} />}
       {st && (
         <>

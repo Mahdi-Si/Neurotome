@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { captureNote, hasTensor, isTextSpec, parseBudget, parseModules, unsavedText } from "./capture";
+import { captureNote, hasTensor, isPySpec, isTextSpec, parseBudget, parseModules, sampleGroups, unsavedText } from "./capture";
 import type { GraphNode, RunMeta, Stats } from "./types";
 
 const meta = (model: Partial<RunMeta["model"]>): RunMeta => ({
@@ -71,5 +71,27 @@ describe("partial captures", () => {
       { tag: "Modules", text: "NNsight capture · module outputs only · 48 module calls" });
     expect(captureNote(meta({ backend: "nnsight", truncated: true }))?.tag).toBe("Truncated");
     expect(captureNote(meta({ backend: "nnsight", capture_modules: ["h.0"] }))?.tag).toBe("Selective");
+  });
+});
+
+describe("dataset samples", () => {
+  const rows = [
+    { ref: "rec01:0", label: "segment 0", group: "rec01" }, { ref: "rec01:1", label: "segment 1", group: "rec01" },
+    { ref: "rec02:0", label: "segment 0", group: "rec02" }, { ref: "x", label: "loose", group: null },
+  ];
+  it("asks for samples only for a complete py: spec", () => {
+    expect(isPySpec("py:examples.signal_model:build")).toBe(true);
+    expect(isPySpec(" py:m:build ")).toBe(true);
+    expect(["py:", "py:examples.signal_model", "py:a:b:c", "hf:gpt2", "torchvision:resnet18"].map(isPySpec)).toEqual([false, false, false, false, false]);
+  });
+  it("filters by every word and groups in list order", () => {
+    const all = sampleGroups(rows, "");
+    expect(all.groups.map(([g, r]) => [g, r.length])).toEqual([["rec01", 2], ["rec02", 1], ["", 1]]);
+    expect(all.matched).toBe(4);
+    const two = sampleGroups(rows, "SEGMENT");   // case-insensitive
+    expect(two.groups.flatMap(([, r]) => r.map((s) => s.ref))).toEqual(["rec01:0", "rec01:1", "rec02:0"]);
+    expect(sampleGroups(rows, "rec02 segment").matched).toBe(1);
+    const cut = sampleGroups(rows, "", 2);
+    expect([cut.matched, cut.shown, cut.groups.length]).toEqual([4, 2, 1]);
   });
 });

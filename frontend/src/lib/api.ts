@@ -1,15 +1,23 @@
 import type {
-  Attribution, CreateRun, DiffResult, Fold, GraphView, Health, IndexEntry, InterventionResult, InterventionSummary, Job, JobRequest, Method,
-  ModelsInfo, ModuleEntry, Objective, RunMeta, SliceResult,
+  Attribution, CreateRun, DiffResult, Fold, GraphView, Health, IndexEntry, InputInfo, InterventionResult, InterventionSummary, Job, JobRequest, Method,
+  MatrixView, ModelsInfo, ModuleEntry, Objective, OutputFull, RunMeta, SampleRef, SignalView, SliceResult, TargetWindow,
   TensorOpts, TensorView,
 } from "./types";
+
+/** A `detail` as one line: the string, or a 422's `[{loc, msg}]` as `steps: Input should be …` (never a JSON dump). */
+export function detailText(d: unknown): string {
+  if (typeof d === "string") return d;
+  if (Array.isArray(d) && d.every((e) => typeof e?.msg === "string"))
+    return d.map((e) => { const loc = Array.isArray(e.loc) ? e.loc.filter((x: unknown) => x !== "body").join(".") : ""; return loc ? `${loc}: ${e.msg}` : e.msg; }).join(" · ");
+  return JSON.stringify(d);
+}
 
 async function ok(res: Response): Promise<Response> {
   if (res.ok) return res;
   let detail = res.statusText;
   try {
     const body = await res.json();
-    detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    detail = detailText(body.detail);
   } catch { /* not json */ }
   throw new Error(`${res.status} · ${detail}`);
 }
@@ -33,6 +41,7 @@ export const api = {
   health: () => req<Health>("/api/health"),
   models: () => req<ModelsInfo>("/api/models"),
   runs: () => req<RunMeta[]>("/api/runs"),
+  samples: (model: string) => req<{ samples: SampleRef[]; error: string | null }>(`/api/samples?${qs({ model })}`),
   run: (id: string) => req<RunMeta>(`/api/runs/${enc(id)}`),
   createRun: (body: CreateRun) => req<Job<RunMeta>>("/api/runs", json(body)),   // 202 + capture job
   deleteRun: (id: string) => req<{ deleted: boolean }>(`/api/runs/${enc(id)}`, { method: "DELETE" }),
@@ -67,6 +76,13 @@ export const api = {
     return req<TensorView>(`/api/runs/${enc(id)}/ops/${enc(op)}/tensor?${q}`);
   },
   inputPreviewUrl: (id: string, created: number) => `/api/runs/${enc(id)}/input.png?v=${created}`,
+  input: (id: string) => req<InputInfo>(`/api/runs/${enc(id)}/input`),
+  inputRawUrl: (id: string, created: number) => `/api/runs/${enc(id)}/input/raw?v=${created}`,
+  inputModelUrl: (id: string, created: number) => `/api/runs/${enc(id)}/input/model.png?v=${created}`,
+  inputSignal: (id: string, points = 1500) => req<SignalView>(`/api/runs/${enc(id)}/input/signal?points=${points}`),
+  inputMatrix: (id: string) => req<MatrixView>(`/api/runs/${enc(id)}/input/matrix`),
+  output: (id: string) => req<OutputFull>(`/api/runs/${enc(id)}/output`),
+  windows: (id: string, t: number) => req<{ windows: TargetWindow[]; error: string | null }>(`/api/runs/${enc(id)}/windows?t=${t}`),
   slice: (id: string, op: string, s: string, iv?: string | null) =>
     req<SliceResult>(`/api/runs/${enc(id)}/ops/${enc(op)}/slice?${qs({ s, iv })}`),
   sliceNpy: async (id: string, op: string, s: string, iv?: string | null) =>

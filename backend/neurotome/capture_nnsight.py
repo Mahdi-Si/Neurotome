@@ -23,7 +23,7 @@ import torch
 
 from .capture import _check_modules, _first_tensor, _grad_leaf, tensor_stats
 from .errors import NO_GRAD, TraceError
-from .interventions import diff_row
+from .interventions import channel_axis, diff_row, per_channel
 from .jobs import Progress
 from .store import RunStore
 
@@ -305,9 +305,10 @@ def op_gradients(
         unit = acts.get(op_id)
         if unit is None:
             raise ValueError(f"Unknown op {op_id}")
-        if unit.dim() < 2 or not 0 <= c < unit.shape[1]:
+        ax = channel_axis(unit.dim())
+        if unit.dim() < 2 or not 0 <= c < unit.shape[ax]:
             raise ValueError(f"Channel {c} out of range for {op_id} with shape {list(unit.shape)}")
-        target, root = None, unit[0, c].sum()
+        target, root = None, unit.select(ax, c)[0].sum()
     if not root.requires_grad:
         raise ValueError(NO_GRAD)
     root.backward()
@@ -319,10 +320,10 @@ def op_gradients(
         grad = grads[oid] if oid in grads else act.grad if act is not None else None
         if act is None or grad is None or act.shape != grad.shape or not act.is_floating_point():
             continue
-        gxa = (act.detach() * grad.detach()).to(torch.float32)
+        gxa = act.detach().float() * grad.detach().float()  # float32 first: a half product overflows
         scores[oid] = float(gxa.sum())
-        if gxa.dim() >= 3:  # (B, C, ...) -> per channel
-            channel_scores[oid] = gxa[0].flatten(1).sum(1).tolist()
+        if gxa.dim() >= 3:  # (B, C, ...) / (B, T, D) -> per channel
+            channel_scores[oid] = per_channel(gxa[0]).tolist()
     return {
         "target": target,
         "logit": logit,
@@ -384,14 +385,15 @@ def intervene(
                 for op, fn in todo:
                     address, _, call = op.rpartition("@")
                     env = reduce(
-                        getattr, address.split("."), nn_model
-                    )  # ModuleList children are "0", "1", ...
+                        getattr, address.split(".") if address else [], nn_model
+                    )  # ModuleList children are "0", "1", ...; "" is a root that is itself a leaf
                     # every edit inside tr.iter: the per-module call tracker only counts while an iter is open
                     for _ in tr.iter[int(call) - 1]:
                         env.output = fn(env.output)
                 out = nn_model.output.save()
     except Exception as e:  # noqa: BLE001 - anything NNsight, forward() or an edit raises
         _raise(e, edits=True)
+    rec.output = out  # the hooked root output is pre-swap when the root itself is the edited leaf
     after = _values(rec, down)
     for op, fn in todo:
         if op in after:

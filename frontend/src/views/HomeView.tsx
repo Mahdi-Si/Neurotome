@@ -1,14 +1,14 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IconArrow, IconGraph, IconHome, IconTensor, IconTrace, Logo } from "../components/Icons";
 import { JobProgress } from "../components/JobProgress";
 import { ThemeToggle } from "../components/TopBar";
 import { api } from "../lib/api";
-import { isTextSpec, parseBudget, parseModules } from "../lib/capture";
-import { bytes, fixed } from "../lib/format";
+import { isPySpec, isTextSpec, parseBudget, parseModules, sampleGroups } from "../lib/capture";
+import { bytes, outScore } from "../lib/format";
 import { followJob } from "../lib/jobs";
-import { href, navigate } from "../lib/router";
+import { href, navigate, parseHash } from "../lib/router";
 import { errText } from "../lib/tensorState";
-import type { Backend, Job, RunMeta } from "../lib/types";
+import type { Backend, Job, RunMeta, SampleRef } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
 
 export function HomeView() {
@@ -20,7 +20,10 @@ export function HomeView() {
   const [model, setModel] = useState("torchvision:resnet18");
   const [weights, setWeights] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
-  const [picked, setPicked] = useState<"text" | "file" | null>(null);   // sticky once the user picks a sample kind
+  const [picked, setPicked] = useState<SampleKind | null>(null);   // sticky once the user picks a sample kind
+  const [samples, setSamples] = useState<{ list: SampleRef[]; error: string | null } | null>(null);   // a py: module's dataset
+  const [filter, setFilter] = useState("");
+  const [ref, setRef] = useState("");
   const [text, setText] = useState("");
   const [backend, setBackend] = useState<Backend | "">("");
   const [mods, setMods] = useState("");
@@ -32,12 +35,26 @@ export function HomeView() {
   const last = useRef<Job<RunMeta> | null>(null);
   const track = (j: Job<RunMeta> | null) => { last.current = j; setJob(j); };
 
-  const kind = picked ?? (isTextSpec(model, models.data?.text ?? []) ? "text" : "file");
+  // a py: spec lists its dataset (list_samples) once typing pauses; a module with samples defaults to Dataset
+  useEffect(() => {
+    if (!isPySpec(model)) { setSamples(null); return; }
+    let alive = true;
+    const t = setTimeout(() => api.samples(model.trim()).then(
+      (r) => alive && setSamples({ list: r.samples, error: r.error }),
+      (e) => alive && setSamples({ list: [], error: errText(e) })), 350);
+    return () => { alive = false; clearTimeout(t); };
+  }, [model]);
+  const data = samples?.list ?? [];
+  const auto: SampleKind = data.length ? "dataset" : isTextSpec(model, models.data?.text ?? []) ? "text" : "file";
+  const kind = picked === "dataset" && !data.length ? auto : picked ?? auto;
+  const view = sampleGroups(data, filter);
+  const chosen = data.some((s) => s.ref === ref) ? ref : view.groups[0]?.[1][0]?.ref ?? "";
   const nnsight = models.data?.backends?.nnsight ?? false;
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     if (kind === "text" && !text.trim()) { setError("Type some text, or pick File"); return; }
+    if (kind === "dataset" && !chosen) { setError("Pick a dataset sample"); return; }
     const max_capture_mb = parseBudget(budget);
     if (Number.isNaN(max_capture_mb)) { setError("Budget must be a positive number of MB, or empty for the server default"); return; }
     const c = (ctl.current = new AbortController());
@@ -45,6 +62,7 @@ export function HomeView() {
     try {
       let sample: Record<string, unknown> = { kind: "random" };
       if (kind === "text") sample = { kind: "text", text };
+      else if (kind === "dataset") sample = { kind: "ref", ref: chosen };
       else if (file) {
         const up = await api.upload(file);
         sample = { kind: "upload", upload_id: up.upload_id, name: file.name };
@@ -52,7 +70,7 @@ export function HomeView() {
       const meta = await followJob<RunMeta>(
         () => api.createRun({ model, weights: weights || null, sample, modules: parseModules(mods), max_capture_mb, backend: backend || null }),
         track, c.signal);
-      navigate(href(meta.id, "graph"));
+      if (parseHash(location.hash).runId == null) navigate(href(meta.id, "graph"));   // still on Home: never yank a user who moved on
     } catch (err) {
       const msg = errText(err);
       if (msg === "Cancelled" && last.current) track({ ...last.current, status: "cancelled" });
@@ -125,12 +143,24 @@ export function HomeView() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span className="lbl dim">Sample</span>
                 <div className="seg lbl" role="group" aria-label="Sample kind">
-                  {(["text", "file"] as const).map((k) => (
-                    <button key={k} type="button" aria-pressed={kind === k} onClick={() => setPicked(k)}>{k === "text" ? "Text" : "File"}</button>
+                  {KINDS.filter((k) => k !== "dataset" || data.length).map((k) => (
+                    <button key={k} type="button" aria-pressed={kind === k} onClick={() => setPicked(k)}>{KIND_LABEL[k]}</button>
                   ))}
                 </div>
               </div>
-              {kind === "text" ? (
+              {kind === "dataset" ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <input className="field" aria-label="Filter samples" placeholder="filter · ref, label or group" value={filter} onChange={(e) => setFilter(e.target.value)} />
+                  <select className="field" aria-label="Dataset sample" size={6} value={chosen} onChange={(e) => setRef(e.target.value)}
+                    style={{ height: "auto", padding: 4 }}>
+                    {view.groups.map(([g, rows]) => {
+                      const opts = rows.map((s) => <option key={s.ref} value={s.ref} title={s.ref}>{s.label}</option>);
+                      return g ? <optgroup key={g} label={g}>{opts}</optgroup> : opts;
+                    })}
+                  </select>
+                  <span className="lbl dim">{view.matched} of {data.length} samples{view.shown < view.matched ? ` · first ${view.shown} shown` : ""}{chosen ? ` · ${chosen}` : ""}</span>
+                </div>
+              ) : kind === "text" ? (
                 <textarea className="field" rows={3} aria-label="Sample text" placeholder="The cat sat on the" value={text}
                   onChange={(e) => setText(e.target.value)} style={{ height: "auto", padding: "8px 10px", resize: "vertical" }} />
               ) : (
@@ -139,6 +169,7 @@ export function HomeView() {
                   <input type="file" accept="image/*,.npy,.pt,.pth" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="mono" />
                 </label>
               )}
+              {samples?.error && <span className="lbl dim" title={samples.error} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>No dataset · {samples.error}</span>}
             </div>
             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <span className="lbl dim" style={{ display: "flex", justifyContent: "space-between" }}>
@@ -188,10 +219,10 @@ export function HomeView() {
                   <span className="mono">{r.model.saved_ops != null && r.model.saved_ops < r.model.num_ops ? `${r.model.saved_ops}/${r.model.num_ops}` : r.model.num_ops}</span>
                   <span className="mono">{bytes(r.model.activation_bytes)}</span>
                   <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {r.output[0] ? `${r.output[0].label ?? `#${r.output[0].index}`} · ${fixed(r.output[0].prob)}` : "—"}
+                    {r.output[0] ? `${r.output[0].label ?? `#${r.output[0].index}`} · ${outScore(r.output[0])}` : "—"}
                   </span>
                   <button type="button" className="lbl dim" aria-label={`Delete ${r.id}`} style={{ border: 0, background: "transparent", cursor: "pointer", justifySelf: "end" }}
-                    onClick={async () => { await api.deleteRun(r.id); setReload((x) => x + 1); }}>Delete</button>
+                    onClick={() => api.deleteRun(r.id).then(() => setReload((x) => x + 1), (err) => setError(errText(err)))}>Delete</button>
                 </div>
               ))}
             </div>
@@ -213,6 +244,10 @@ $ neurotome capture torchvision:resnet18 \\
     </div>
   );
 }
+
+type SampleKind = "text" | "file" | "dataset";
+const KINDS: SampleKind[] = ["text", "file", "dataset"];
+const KIND_LABEL: Record<SampleKind, string> = { text: "Text", file: "File", dataset: "Dataset" };
 
 const rowGrid: React.CSSProperties = {
   display: "grid", gridTemplateColumns: "1.4fr 1.4fr 0.5fr 0.8fr 1.3fr 0.5fr", gap: 12, padding: "12px 0",

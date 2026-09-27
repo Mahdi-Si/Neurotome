@@ -13,12 +13,13 @@ const TABS: { tab: Tab; label: string }[] = [
 ];
 const tabStyle: React.CSSProperties = { display: "flex", alignItems: "center", padding: "0 11px", marginBottom: -1 };
 
-/** Params a tab link keeps: none to Lens; `set` (the draft) only to the tabs that compose it. */
-const linkParams = (tab: Tab, node: string | null | undefined, carry: Record<string, string | null> = {}) =>
-  tab === "lens" ? {} : { node, ...carry, ...(tab !== "graph" && tab !== "interventions" && { set: null }) };
+/** Params a tab link keeps: none to Lens; `set` (the draft) only to the tabs that compose it. The Tensors link opens
+ * `op` (the node's tensor op) when given: the Tensor view lists ops, so a module node id (`m:…`) means nothing there. */
+const linkParams = (tab: Tab, node: string | null | undefined, carry: Record<string, string | null> = {}, op?: string | null) =>
+  tab === "lens" ? {} : { node: (tab === "tensors" && op) || node, ...carry, ...(tab !== "graph" && tab !== "interventions" && { set: null }) };
 
-export function TopBar({ run, tab, node, carry, children }: {
-  run: RunMeta | null; tab: Tab; node?: string | null; carry?: Record<string, string | null>; children?: React.ReactNode;
+export function TopBar({ run, tab, node, op, carry, children }: {
+  run: RunMeta | null; tab: Tab; node?: string | null; op?: string | null; carry?: Record<string, string | null>; children?: React.ReactNode;
 }) {
   const model = run?.model.spec?.split(":").pop() ?? run?.model.class_name ?? "";
   return (
@@ -45,7 +46,7 @@ export function TopBar({ run, tab, node, carry, children }: {
             <span key={t.tab} className="lbl" aria-disabled="true" title="Logit lens needs a causal language model"
               style={{ ...tabStyle, color: "var(--ink-2)", opacity: 0.45, borderBottom: "1.5px solid transparent" }}>{t.label}</span>
           ) : (
-            <a key={t.tab} href={href(run.id, t.tab, linkParams(t.tab, node, carry))} className="lbl"
+            <a key={t.tab} href={href(run.id, t.tab, linkParams(t.tab, node, carry, op))} className="lbl"
               aria-current={t.tab === tab ? "page" : undefined}
               style={{
                 ...tabStyle,

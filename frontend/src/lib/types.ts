@@ -28,13 +28,17 @@ export interface RunMeta {
     budget_bytes?: number | null; capture_modules?: string[] | null; saved_ops?: number; // absent before M4
     backend?: Backend; granularity?: "op" | "module"; lm?: boolean; // absent before v0.2 = torchlens, op, false
   };
-  sample: { kind: string; name: string; text?: string; token_ids?: number[]; tokens?: string[] };
+  sample: {
+    kind: string; name: string; text?: string; token_ids?: number[]; tokens?: string[];
+    ref?: string; info?: Record<string, string | number | null>;   // kind "ref": a py: module's load_sample(ref)
+  };
   input_shape: number[] | null;
   output: TopK[];
   categories: string[] | null;
   reloadable: boolean;
   status: string;
   preview?: { width: number; height: number } | null; // absent on pre-M2 runs
+  input?: { raw: RawInput | null; steps: string[] | null; norm: number[][] | null; blocks?: InputBlock[] | null; time?: InputTime | null }; // absent before 0.3.0
   output_error?: string | null; // absent before M4
 }
 
@@ -95,7 +99,49 @@ export interface ModuleEntry { address: string; name: string; class_name: string
 
 export interface Hist { counts: number[]; range: [number, number] }
 export interface Pca { points: [number, number][]; color: number[]; explained: number[] }
-export interface ViewStats { mean: number; std: number; min: number; max: number }
+/** Over finite values; null when the tensor holds none. */
+/** The uploaded image as it was, kept with the run (`GET /api/runs/{id}/input/raw`). */
+export interface ImageRaw { kind?: undefined; file: string; width: number; height: number; format: string; bytes: number }
+/** A dataset sample's raw signal (`load_sample` raw), kept as input_raw.npz; t in seconds, sample i at t0 + i / fs. */
+export interface SignalRaw {
+  kind: "signal"; file: string; fs: number; t0: number; time_label: string;
+  channels: { name: string; unit: string | null; length: number }[];
+}
+export type RawInput = ImageRaw | SignalRaw;
+/** Column group [start, stop) of a (1, T, C) input's last axis, with a label per column. */
+export interface InputBlock { name: string; start: number; stop: number; labels: string[] | null; unit: string | null }
+/** Input axis `axis` is time: step i sits at t0 + i · step_s on the raw signal's clock. */
+export interface InputTime { axis: number; step_s: number; t0: number }
+/** The Input view (`GET /api/runs/{id}/input`): the sample, its preprocessing and the model input it became. */
+export interface InputInfo {
+  op: string; shape: number[]; dtype: string | null; sample: RunMeta["sample"];
+  raw: RawInput | null;          // null: not an uploaded image / dataset signal, or captured before 0.3.0
+  steps: string[] | null;        // the preprocessing in words; null before 0.3.0 and for in-process runs
+  normalised: boolean;           // the model-input picture undoes (mean, std); else it is min-max stretched
+  picture: boolean;              // a (1, 1|3, H, W) input: /input/model.png draws it
+  // one row per channel of an image, per block of a (1, T, C) input with blocks (named), else one row
+  channels: { channel: number | null; name?: string; mean: number | null; std: number | null; min: number | null; max: number | null }[];
+  blocks?: InputBlock[] | null; time?: InputTime | null; info?: Record<string, string | number | null> | null;   // absent: older server
+}
+/** `GET /api/runs/{id}/input/signal`: each raw channel pooled to ≤ points (stride raw samples per point). */
+export interface SignalView {
+  fs: number; t0: number; time_label: string; stride: number;
+  channels: { name: string; unit: string | null; length: number; stride: number; min: (number | null)[]; max: (number | null)[]; mean: (number | null)[] }[];
+}
+/** `GET /api/runs/{id}/input/matrix`: a (1, T, C) input per block, values[column][time col] mean-pooled by stride. */
+export interface MatrixView {
+  time: InputTime | null; steps: number; stride: number;
+  blocks: { name: string; unit: string | null; labels: string[] | null; start: number; lo: number | null; hi: number | null; values: (number | null)[][] }[];
+}
+/** A dataset sample of a py: module (`GET /api/samples?model=`). */
+export interface SampleRef { ref: string; label: string; group: string | null }
+/** `GET /api/runs/{id}/output`: every output element; above 4096 the max of each `stride` block and no labels. */
+export interface OutputFull { n: number; stride: number; values: (number | null)[]; labels: (string | null)[] | null }
+export type WindowKind = "target" | "context" | "horizon";
+/** A py: module's `target_windows(t)`, checked: steps [start, stop) of the input's time axis, its blocks (null = all). */
+export interface TargetWindow { label: string; start: number; stop: number; blocks: string[] | null; kind: WindowKind }
+
+export interface ViewStats { mean: number | null; std: number | null; min: number | null; max: number | null }
 
 export type Norm = "channel" | "global";
 export type Cmap = "seq" | "div";
@@ -137,7 +183,7 @@ export interface VectorTensorView {
   shape: number[];
   length: number;
   values: number[];
-  top: { index: number; value: number }[];
+  top: { index: number; value: number | null }[];   // null: a non-finite value
   hist: Hist;
   stats: ViewStats;
 }
@@ -164,16 +210,23 @@ export interface DiffResult {
 }
 
 export interface AttentionHead {
-  head: number; entropy: number;          // mean over query rows, bits
-  prev: number; first: number; self: number;   // mean weight on q-1 (q ≥ 1), on key 0, on key q
-  pattern: "previous" | "first" | "self" | null;   // the one > 0.5, else null
+  head: number; entropy: number;          // mean over live (not fully masked) query rows, bits
+  entropy_norm: number;                   // entropy / log2 K, 0 … 1
+  sparsity: number; masked: number;       // fraction of exact zeros in live rows; fraction of all-zero (masked) rows
+  argmax: number; argmax_weight: number;  // the key with the highest mean weight (key profile peak) and that weight
+  // square maps only (Q = K): mean weight on q-1 (q ≥ 1), on key 0, on key q; the one > 0.5, else null
+  prev?: number; first?: number; self?: number;
+  pattern?: "previous" | "first" | "self" | null;
 }
 export interface AttentionTensorView {
   kind: "attention"; shape: number[];
+  layout: "hqk" | "qhk"; square: boolean;               // qhk: heads in the middle, e.g. (time, head, lag)
   heads: number; tokens: number; head: number;          // head = selected (the `channel` param, clamped; default 0)
+  queries: number; keys: number;                        // tokens = queries (older readers)
   maps: { head: number; map: number[][]; max: number }[];  // every head (≤ 64), pooled mean ≤ 64×64, map / max → [0, 1]
   full: { map: number[][]; max: number };                   // selected head, pooled ≤ 128×128, map / max
   summary: AttentionHead[];                                  // every head, from the unpooled tensor
+  key_profile: number[][];                                   // every head: mean weight per key over live queries, pooled ≤ 256
   stats: ViewStats; hist: Hist;                              // stats: whole tensor; hist: selected head
 }
 export type TensorView = ImageTensorView | SequenceTensorView | VectorTensorView | AttentionTensorView;
@@ -191,11 +244,26 @@ export interface Attribution {
   target: number | null; target_label: string | null;
   prob: number | null; logit: number | null; value: number;
   steps: number | null;
-  input: { map: number[][]; total: number; convergence_delta: number | null } | null;
+  input: InputMap | null;
   scores: Record<string, number>;
   top_units: { op: string; path?: string; channel: number; value: number }[];
   input_note?: string | null;
   tokens?: TokenAttribution | null;   // integer (token) inputs, v0.2
+}
+
+/** An input attribution map, signed in [-1, 1]: pooled to ≤ 24×24 (images: summed over channels), or a sequence's
+ * channel × time map (`kind: "series"`). */
+export type InputMap = { kind?: undefined; map: number[][]; total: number; convergence_delta: number | null } | SeriesMap;
+/** A (1, T, C) / (1, C, T) input's attribution: map[row][col], row = `row_stride` channels (1 up to 160 channels),
+ * col = Σ over `stride` time steps (≤ 128 columns); blocks in channel order with Σ a, Σ|a| and share of Σ|a|;
+ * time_totals = the signed Σ of each column; time: step i at t0 + i · step_s seconds (null: steps only). */
+export interface SeriesMap {
+  kind: "series"; map: number[][]; total: number; convergence_delta: number | null;
+  channels: number; row_stride: number; steps: number; stride: number;
+  time: { t0: number; step_s: number; label: string } | null;
+  blocks: (InputBlock & { sum: number; abs: number; share: number })[];
+  time_totals: number[];
+  scale?: number;   // map × scale = Σ a of a cell (absent before the unpooled map)
 }
 
 export interface TokenAttribution {
@@ -227,7 +295,7 @@ export interface LayerResult {
 
 export interface NeuronResult {
   method: "neuron_cond"; method_label: string; op: string; path: string; channel: number; objective_label: string; steps: number;
-  input: { map: number[][]; total: number; convergence_delta: null };
+  input: InputMap;
 }
 
 export interface AgreementBlock {

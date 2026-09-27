@@ -48,7 +48,7 @@ test("the logit lens runs from the Lens tab", async ({ page }) => {
 
 test("integrated gradients on a token input fill the token strip", async ({ page }) => {
   await page.goto(url(`#/runs/${run.id}/trace`));
-  await page.getByRole("button", { name: "Run attribution" }).click();
+  await page.getByRole("button", { name: "Run attribution" }).first().click();
   await expect(page.getByRole("group", { name: "Token attribution" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText("Completeness Δ")).toBeVisible();
 });

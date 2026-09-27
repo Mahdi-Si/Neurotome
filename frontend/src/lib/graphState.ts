@@ -116,3 +116,9 @@ export function nodeTones(view: GraphView, mode: ColorMode, iv?: InterventionRes
   }
   return { legend: null };
 }
+
+/** The `depth` URL param: an integer ≥ 0, else the default 2 (`depth=abc` / `-1` / `1.5` must not reach the API as NaN). */
+export function graphDepth(params: URLSearchParams): number {
+  const d = params.get("depth");
+  return d != null && /^\d+$/.test(d) ? Number(d) : 2;
+}

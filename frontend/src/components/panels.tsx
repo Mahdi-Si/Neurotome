@@ -4,6 +4,7 @@ import { unsavedText } from "../lib/capture";
 import { fileName } from "../lib/exportPng";
 import { compact, displayName, dtypeShort, num, pct, shape, shapeShort } from "../lib/format";
 import { rms } from "../lib/graphState";
+import { scopeAxes } from "../lib/interventionState";
 import { href } from "../lib/router";
 import { traceParams } from "../lib/traceState";
 import type { GraphNode, GraphView, ModuleEntry } from "../lib/types";
@@ -41,7 +42,7 @@ export function ModuleTree({ modules, selectedPath, onPick }: {
                 width: "100%", display: "flex", alignItems: "center", height: 27, padding: "0 8px", border: 0,
                 borderRadius: 4, cursor: "pointer", textAlign: "left",
                 background: on ? "var(--accent-soft)" : "transparent",
-                color: on ? "var(--accent)" : ancestor ? "var(--ink)" : "var(--ink)", fontWeight: ancestor ? 500 : 400,
+                color: on ? "var(--accent)" : "var(--ink)", fontWeight: ancestor ? 500 : 400,
               }}>
               <span style={{ width: (m.depth - 1) * 14, flexShrink: 0, alignSelf: "stretch", borderRight: m.depth > 1 ? "1px solid var(--line-soft)" : 0, marginRight: m.depth > 1 ? 8 : 0 }} />
               <span style={{ flexGrow: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
@@ -70,6 +71,7 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
 
   if (!node) return <div className="empty lbl">Select a node</div>;
   const st = node.stats;
+  const iv = intervention?.result?.hash ?? null;   // the open intervention travels to Tensors and Trace like the TopBar tabs
   const index = view.nodes.findIndex((n) => n.id === node.id) + 1;
   return (
     <div style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 16, minHeight: 0 }} className="scroll">
@@ -141,13 +143,13 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
       </div>
       {intervention && <InterventionPanel {...intervention} node={node} key={node.id} />}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: "auto" }}>
-        {node.shape.length >= 2 && <TraceFrom key={node.id} runId={runId} node={node} />}
+        {node.shape.length >= 2 && <TraceFrom key={node.id} runId={runId} node={node} iv={iv} />}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
           {node.unsaved
             ? <button type="button" className="btn solid lbl" disabled title={`No tensor saved (${unsavedText(node.unsaved)})`} style={{ height: 38 }}>Open tensor →</button>
-            : <a href={href(runId, "tensors", { node: node.output_op })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>}
-          <a href={href(runId, "trace", { node: node.id })} className="btn lbl" style={{ height: 38 }}>Trace</a>
-          <a href={href(runId, "trace", traceParams({ node: node.id, layer: "layer_ig", lop: node.output_op, go: true }))}
+            : <a href={href(runId, "tensors", { node: node.output_op, iv })} className="btn solid lbl" style={{ height: 38 }}>Open tensor →</a>}
+          <a href={href(runId, "trace", { node: node.id, iv })} className="btn lbl" style={{ height: 38 }}>Trace</a>
+          <a href={href(runId, "trace", traceParams({ node: node.id, layer: "layer_ig", lop: node.output_op, go: true, iv }))}
             className="btn lbl" style={{ height: 38, gridColumn: "1 / -1" }}>Layer attribution</a>
         </div>
       </div>
@@ -156,15 +158,15 @@ export function Inspector({ runId, view, node, total, linkFor = (id) => href(run
 }
 
 /** Channel picker linking to a unit objective in the Trace view; render with key={node.id} so the channel resets. */
-function TraceFrom({ runId, node }: { runId: string; node: GraphNode }) {
+function TraceFrom({ runId, node, iv }: { runId: string; node: GraphNode; iv: string | null }) {
   const [channel, setChannel] = useState(0);
-  const n = node.shape[1];
+  const n = scopeAxes(node.shape).channels ?? node.shape[1];   // features for (B, T, D), as the server
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <span className="lbl dim" style={{ flexGrow: 1 }}>Trace from</span>
       <input className="field" type="number" aria-label="Channel" min={0} max={n - 1} value={channel} style={{ width: 80 }}
         onChange={(e) => { const c = Number(e.target.value); if (Number.isInteger(c) && c >= 0 && c < n) setChannel(c); }} />
-      <a href={href(runId, "trace", traceParams({ node: node.id, obj: { op: node.output_op, channel }, go: true }))} className="btn lbl">Trace ch →</a>
+      <a href={href(runId, "trace", traceParams({ node: node.id, obj: { op: node.output_op, channel }, go: true, iv }))} className="btn lbl">Trace ch →</a>
     </div>
   );
 }

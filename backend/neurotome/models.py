@@ -4,7 +4,10 @@ A model is named by a *spec* string so a run can be reloaded after a restart:
 
 * ``torchvision:resnet18``            any name accepted by ``torchvision.models.get_model``
 * ``hf:gpt2``, ``hf:<local dir>``     a Hugging Face model (``hf`` extra) with its tokenizer / image processor
-* ``py:examples.custom_model:build``  import ``build`` from a module on ``sys.path`` and call it
+* ``py:examples.custom_model:build``  import ``build`` from a module on ``sys.path`` and call it; the
+  module may also define ``INPUT_SHAPE``, ``CATEGORIES``, ``TOKENIZER``, ``preprocess(img)``, ``OUTPUT_KIND``
+  and a dataset (``list_samples()`` / ``load_sample(ref)`` / ``target_windows(index)``, see
+  ``examples/signal_model.py``)
 
 Models built in-process (``neurotome.open(model, x)``) have no spec and live only
 in memory for the server's lifetime; their captured data persists on disk.
@@ -21,6 +24,7 @@ import sys
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -74,12 +78,18 @@ class LoadedModel:
     # encode(text) -> ids, decode(ids) -> str, optional pad_token_id / eos_token_id (HF tokenizers qualify)
     tokenizer: Any | None = None
     lm: bool = False  # a causal LM with a tokenizer: the logit lens applies
+    # what preprocess does to an image, in words (shown next to the raw and the model input); None: unknown
+    steps: list[str] | None = None
+    # "logits": the output summary is a softmax top-5; "values": top-5 by raw value (scores, regression)
+    output_kind: str = "logits"
+    # a py: module's dataset hook: ref -> {input, raw, blocks, time, steps, info} (examples/signal_model.py)
+    load_sample: Callable[[str], dict[str, Any]] | None = None
 
 
-def _default_image_preprocess(size: int = 224) -> Callable[[Any], torch.Tensor]:
+def _default_transform(size: int = 224) -> Any:
     from torchvision import transforms
 
-    tf = transforms.Compose(
+    return transforms.Compose(
         [
             transforms.Resize(size + 32),
             transforms.CenterCrop(size),
@@ -87,7 +97,65 @@ def _default_image_preprocess(size: int = 224) -> Callable[[Any], torch.Tensor]:
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
     )
+
+
+def _default_image_preprocess(size: int = 224) -> Callable[[Any], torch.Tensor]:
+    tf = _default_transform(size)
     return lambda img: tf(img.convert("RGB")).unsqueeze(0)
+
+
+def _vec(v: Sequence[float]) -> str:
+    return "(" + ", ".join(f"{float(x):.3g}" for x in v) + ")"
+
+
+def _normalize_step(mean: Sequence[float], std: Sequence[float]) -> str:
+    return f"Normalize (x − mean) / std · mean {_vec(mean)} · std {_vec(std)}"
+
+
+def transform_steps(tf: Any) -> list[str]:
+    """A torchvision image transform in words: Compose lists, the weights' ImageClassification preset, or its
+    repr for anything else. Every image path converts to RGB first and adds the batch axis last."""
+    from torchvision import transforms as T
+
+    how = lambda m: getattr(m, "value", str(m))  # noqa: E731 - InterpolationMode.BILINEAR -> "bilinear"
+    if isinstance(tf, T.Compose):
+        return [s for t in tf.transforms for s in transform_steps(t)]
+    if hasattr(tf, "crop_size") and hasattr(tf, "resize_size"):  # torchvision weights: ImageClassification
+        c = tf.crop_size[0]
+        resize = f"Resize shorter side to {tf.resize_size[0]} px ({how(tf.interpolation)})"
+        return [resize, f"Center crop {c}×{c}", "Scale to [0, 1] (÷ 255)", _normalize_step(tf.mean, tf.std)]
+    if isinstance(tf, T.Resize):
+        s = tf.size
+        if isinstance(s, int) or len(s) == 1:
+            short = s if isinstance(s, int) else s[0]
+            return [f"Resize shorter side to {short} px ({how(tf.interpolation)})"]
+        return [f"Resize to {s[0]}×{s[1]} ({how(tf.interpolation)})"]
+    if isinstance(tf, T.CenterCrop):
+        return [f"Center crop {tf.size[0]}×{tf.size[1]}"]
+    if isinstance(tf, T.ToTensor):
+        return ["Scale to [0, 1] (÷ 255)"]
+    if isinstance(tf, T.Normalize):
+        return [_normalize_step(tf.mean, tf.std)]
+    return [" ".join(repr(tf).split())]
+
+
+def processor_steps(p: Any) -> list[str]:
+    """A Hugging Face image processor in words (the attributes its __call__ applies, in that order)."""
+    get = lambda d, k: d.get(k) if isinstance(d, dict) else getattr(d, k, None)  # noqa: E731 - dict or SizeDict
+    steps = []
+    if getattr(p, "do_resize", False) and (size := getattr(p, "size", None)) is not None:
+        how = getattr(getattr(p, "resample", None), "name", "").lower()
+        h, w, short = get(size, "height"), get(size, "width"), get(size, "shortest_edge")
+        what = f"to {h}×{w}" if h and w else f"shorter side to {short} px" if short else str(size)
+        steps.append(f"Resize {what}" + (f" ({how})" if how else ""))
+    if getattr(p, "do_center_crop", False) and (crop := getattr(p, "crop_size", None)) is not None:
+        steps.append(f"Center crop {get(crop, 'height')}×{get(crop, 'width')}")
+    if getattr(p, "do_rescale", False):
+        f = float(getattr(p, "rescale_factor", 1 / 255))
+        steps.append("Scale to [0, 1] (÷ 255)" if abs(f - 1 / 255) < 1e-9 else f"Rescale × {f:.6g}")
+    if getattr(p, "do_normalize", False):
+        steps.append(_normalize_step(p.image_mean, p.image_std))
+    return steps
 
 
 def load_model(spec: str, weights: str | None = None, device: str = "cpu") -> LoadedModel:
@@ -118,12 +186,14 @@ def _load_torchvision(name: str, weights: str | None, device: str) -> LoadedMode
     categories = None
     preprocess = _default_image_preprocess()
     norm = (IMAGENET_MEAN, IMAGENET_STD)
+    steps = transform_steps(_default_transform())
     if weights:
         enum = torchvision.models.get_model_weights(name)
         w = enum["DEFAULT" if weights.upper() == "DEFAULT" else weights]
         categories = list(w.meta.get("categories") or []) or None
         tf = w.transforms()
         preprocess = lambda img: tf(img.convert("RGB")).unsqueeze(0)  # noqa: E731
+        steps = transform_steps(tf)
         if hasattr(tf, "mean") and hasattr(tf, "std"):
             norm = (tuple(tf.mean), tuple(tf.std))
     model = torchvision.models.get_model(name, weights=w).eval().to(device)
@@ -134,6 +204,7 @@ def _load_torchvision(name: str, weights: str | None, device: str) -> LoadedMode
         categories=categories,
         preprocess=preprocess,
         norm=norm,
+        steps=["Convert to RGB", *steps],
     )
 
 
@@ -202,12 +273,14 @@ def _load_hf(repo: str, weights: str | None, device: str) -> LoadedModel:
         size = getattr(config, "image_size", None) or 224
         loaded.preprocess = lambda img: proc(images=img.convert("RGB"), return_tensors="pt")["pixel_values"]
         loaded.norm = (tuple(proc.image_mean), tuple(proc.image_std))
+        loaded.steps = ["Convert to RGB", *processor_steps(proc)]
         loaded.default_input_shape = [1, 3, size, size]
         loaded.categories = labels
     return loaded
 
 
-def _load_python(target: str, device: str) -> LoadedModel:
+def _py_module(target: str) -> tuple[Any, str, str]:
+    """(module, module name, factory name) of a ``py:`` spec's target, imported, factory not called."""
     module_name, _, attr = target.rpartition(":")
     if not module_name:
         raise ValueError("py specs look like 'py:package.module:factory'")
@@ -215,8 +288,41 @@ def _load_python(target: str, device: str) -> LoadedModel:
     cwd = os.getcwd()
     if cwd not in sys.path:
         sys.path.insert(0, cwd)
-    mod = importlib.import_module(module_name)
+    return importlib.import_module(module_name), module_name, attr
+
+
+def _sample_row(s: Any) -> dict[str, Any]:
+    if not isinstance(s, dict) or not isinstance(s.get("ref"), str):
+        raise ValueError(f"list_samples() rows must be dicts with a str 'ref', got {s!r:.80}")
+    g = s.get("group")
+    return {"ref": s["ref"], "label": str(s.get("label") or s["ref"]), "group": None if g is None else str(g)}
+
+
+# ponytail: cached for the server's life per spec; a dataset that changes on disk needs a restart
+@lru_cache(maxsize=16)
+def list_samples(spec: str) -> list[dict[str, Any]]:
+    """The samples a ``py:`` module's ``list_samples()`` offers (import only: the model is not built); [] for
+    other specs and modules without the hook. Import or hook errors raise (the API reports them)."""
+    kind, _, rest = check_spec(spec).partition(":")
+    if kind != "py":
+        return []
+    fn: Callable[[], list[Any]] | None = getattr(_py_module(rest)[0], "list_samples", None)
+    return [_sample_row(s) for s in fn()] if callable(fn) else []
+
+
+def target_windows(spec: str, index: int) -> Any:
+    """What a ``py:`` module's ``target_windows(index)`` returns (import only: the model is not built),
+    unchecked (``runs.check_windows`` checks it against the run's input); [] for other specs and modules
+    without the hook."""
+    kind, _, rest = check_spec(spec).partition(":")
+    fn = getattr(_py_module(rest)[0], "target_windows", None) if kind == "py" else None
+    return fn(index) if callable(fn) else []
+
+
+def _load_python(target: str, device: str) -> LoadedModel:
+    mod, module_name, attr = _py_module(target)
     factory = getattr(mod, attr)
+    torch.manual_seed(0)  # again: the first import may have drawn random numbers, a cached module does not
     model = factory()
     model = (_prepare_hf(model) if is_hf(model) else model.eval()).to(device)
     tok = getattr(mod, "TOKENIZER", None)
@@ -225,9 +331,11 @@ def _load_python(target: str, device: str) -> LoadedModel:
     v = vocab_size(model) if tok else None
     preprocess = getattr(mod, "preprocess", None)
     norm = None
+    steps = [f"Custom: {module_name}.preprocess"] if preprocess is not None else None
     if preprocess is None and len(shape) == 4 and shape[1] in (1, 3):
         preprocess = _default_image_preprocess(shape[-1])
         norm = (IMAGENET_MEAN, IMAGENET_STD)
+        steps = ["Convert to RGB", *transform_steps(_default_transform(shape[-1]))]
     return LoadedModel(
         model=model,
         spec=f"py:{target}",
@@ -238,6 +346,9 @@ def _load_python(target: str, device: str) -> LoadedModel:
         norm=norm,
         tokenizer=tok,
         lm=tok is not None and is_lm(model),
+        steps=steps,
+        output_kind=getattr(mod, "OUTPUT_KIND", "logits"),
+        load_sample=getattr(mod, "load_sample", None),
     )
 
 

@@ -15,7 +15,7 @@ test.beforeAll(async ({ playwright }) => {
 test("integrated gradients, then method agreement", async ({ page }) => {
   await page.goto(url(`#/runs/${run.id}/trace`));
   await page.getByRole("group", { name: "Attribution method" }).getByRole("button", { name: "Integrated grad" }).click();
-  await page.getByRole("button", { name: "Run attribution" }).click();
+  await page.getByRole("button", { name: "Run attribution" }).first().click();
   const progress = page.getByRole("progressbar", { name: "attribution job" });
   await expect(progress.or(page.getByText("Completeness Δ")).first()).toBeVisible();
   await expect(page.getByText("Completeness Δ")).toBeVisible({ timeout: 30_000 });

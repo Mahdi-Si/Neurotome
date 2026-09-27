@@ -11,13 +11,16 @@ export interface Route {
   params: URLSearchParams;
 }
 
+/** decodeURIComponent that keeps a malformed escape (`%E0%A4%A`) as typed: it throws, and parseHash must not. */
+const decode = (s: string) => { try { return decodeURIComponent(s); } catch { return s; } };
+
 export function parseHash(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?");
   const parts = path.split("/").filter(Boolean);
   const params = new URLSearchParams(query);
   if (parts[0] === "runs" && parts[1]) {
     const tab = (["graph", "tensors", "trace", "lens", "interventions"].includes(parts[2]) ? parts[2] : "graph") as Tab;
-    return { runId: decodeURIComponent(parts[1]), tab, params };
+    return { runId: decode(parts[1]), tab, params };
   }
   return { runId: null, tab: "graph", params };
 }

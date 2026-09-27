@@ -24,6 +24,17 @@ GEN_KINDS = ("zero", "constant", "scale", "steer")  # + mean over positions
 CH_AXIS = {4: 1, 3: 2, 2: 1}
 SCOPED = "(B, C, H, W), (B, T, D) or (B, D)"
 
+
+def channel_axis(ndim: int) -> int:
+    """The channel axis of a (batched) tensor everywhere in Neurotome: features for (B, T, D), else axis 1."""
+    return CH_AXIS.get(ndim, 1)
+
+
+def per_channel(t: torch.Tensor) -> torch.Tensor:
+    """Σ over every axis but the channel axis of an unbatched tensor (one value per channel)."""
+    return t.movedim(channel_axis(t.dim() + 1) - 1, 0).flatten(1).sum(1)
+
+
 Fn = Callable[[torch.Tensor], torch.Tensor]
 
 
@@ -273,7 +284,7 @@ def label(edit: dict[str, Any], path: str, resolved: str | None = None, n_runs: 
     else:
         a, d = edit["alpha"], edit["direction"]
         v = f"e_{d['channel']}" if d["kind"] == "channel" else f"({d['run_b']} − {d['run_a']}, {d['pool']})"
-        name = f"Steer {'+' if a >= 0 else '-'}{num(abs(a))} × {v}"
+        name = f"Steer {'+' if a >= 0 else '−'}{num(abs(a))} × {v}"  # the client's minus sign (U+2212)
     return f"{name} · {path} · {_scope_text(edit)}"
 
 
@@ -332,9 +343,9 @@ def _hooked(model: torch.nn.Module, hooks: list[tuple[tuple[str, int], Fn]]) -> 
             output = _apply(output, fn)
         return output
 
+    mods = {address: model.get_submodule(address) for address in sites}  # first: a bad address leaks no hook
     handles = [model.register_forward_pre_hook(lambda *_: counts.clear())]
-    for address in sites:
-        mod = model.get_submodule(address)
+    for address, mod in mods.items():
         handles.append(mod.register_forward_hook(lambda m, a, o, address=address: post(address, m, a, o)))
     return handles
 

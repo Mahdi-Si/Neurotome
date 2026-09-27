@@ -67,6 +67,17 @@ test("rename, then delete the saved intervention", async ({ page }) => {
   await expect(page).not.toHaveURL(/[?&]iv=/);
 });
 
+test("a block picked in the graph opens in Interventions under the server's name, and in Tensors as its op", async ({ page }) => {
+  await page.goto(url(`#/runs/${lm.id}/graph?depth=1&node=${encodeURIComponent("m:transformer.h.0:1")}`));
+  await expect(page.getByRole("link", { name: "Tensors" })).toHaveAttribute("href", new RegExp(`node=${encodeURIComponent(block0).replace(/\./g, "\\.")}(&|$)`));
+  await page.getByRole("link", { name: "Interventions" }).click();
+  await expect(page.getByRole("combobox", { name: "Node" }).locator("option:checked")).toHaveText(/^transformer\.h\.0 · /);
+  await page.getByRole("button", { name: "Add to set" }).click();
+  await expect(page.getByText("1 · Zero · transformer.h.0 · all")).toBeVisible();   // the draft reads like the server's label
+  await page.getByRole("button", { name: "Run interventions" }).click();
+  await expect(page.getByRole("region", { name: "Intervention result" }).getByText("1 · Zero · transformer.h.0 · all")).toBeVisible({ timeout: 30_000 });
+});
+
 test("steer the tiny LM and generate both continuations", async ({ page }) => {
   await page.goto(url(`#/runs/${lm.id}/interventions?node=${encodeURIComponent(block0)}`));
   await page.getByRole("group", { name: "Edit kind" }).getByRole("button", { name: "Steer" }).click();

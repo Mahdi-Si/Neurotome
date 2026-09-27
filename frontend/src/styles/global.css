@@ -52,6 +52,10 @@ h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.04em; }
 .seg > button + button { border-left: 1px solid var(--ink); }
 .seg > button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
 .seg > button:disabled { opacity: 0.45; cursor: default; }
+/* 1 px gaps over an ink ground draw the grid rules */
+.seg-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--ink); }
+.seg-grid > button { background: var(--panel); }
+.seg-grid > button + button { border-left: 0; }
 
 .field {
   height: 32px; border: 1px solid var(--line); background: var(--panel); padding: 0 10px;
@@ -77,10 +81,20 @@ h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.04em; }
 .graph-canvas:focus { outline: none; }
 .graph-canvas:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -2px; }
 
+/* the right panel's draggable left edge (SideResize): an 8 px hit strip, a 2 px accent rule on hover / drag / focus */
+.side-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; touch-action: none; }
+.side-resize:focus-visible { outline: none; }
+.side-resize:hover::after, .side-resize:active::after, .side-resize:focus-visible::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: var(--accent);
+}
+@media (forced-colors: active) { .side-resize:hover::after, .side-resize:active::after, .side-resize:focus-visible::after { background: Highlight; } }
+
 /* PNG export button on the right of a chart readout line */
 .chart-export { border: 0; background: none; padding: 0; cursor: pointer; color: var(--ink-2); flex-shrink: 0; }
 .chart-export:not(.lbl) { font: inherit; }
 .chart-export:hover { color: var(--accent); }
+/* chart axis ranges (<Axes>): mono 10 px ink-2, one line, no tracking so a value is 6 px a character */
+.axis { font-family: var(--font-mono); font-size: 10px; line-height: 10px; color: var(--ink-2); white-space: nowrap; }
 
 /* job progress: 4px line-soft track with an accent fill at the job's progress */
 .job-track { height: 4px; background: var(--line-soft); }
@@ -98,4 +112,5 @@ h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.04em; }
   .btn.solid, .seg > button[aria-pressed="true"], .graph-canvas button { forced-color-adjust: none; }
   [aria-pressed="true"], [aria-current="page"] { outline: 2px solid Highlight; outline-offset: -2px; }
   .job-track > div { forced-color-adjust: none; background: Highlight; }
+  .seg-grid { forced-color-adjust: none; }   /* its rules are the ink ground between cells */
 }

@@ -1,6 +1,6 @@
 // Capture options (Home form) and partial-capture wording (banner, graph nodes, inspector, tensor view).
 import { bytes } from "./format";
-import type { GraphNode, RunMeta, Unsaved } from "./types";
+import type { GraphNode, RunMeta, SampleRef, Unsaved } from "./types";
 
 /** The node's output tensor is on disk (old servers send no `unsaved`: saved iff it has stats). */
 export const hasTensor = (n: GraphNode) => !n.unsaved && n.stats != null;
@@ -28,6 +28,22 @@ const VISION = /vit|deit|beit|swin|convnext|resnet|dino|detr|clip|siglip|image|s
 
 /** The Home form defaults to a text sample for a known text model or any hf: spec that does not look like vision. */
 export const isTextSpec = (spec: string, text: string[]) => text.includes(spec) || (/^hf:/i.test(spec) && !VISION.test(spec));
+
+/** A py: spec complete enough to ask the server for its dataset samples (`py:pkg.mod:build`). */
+export const isPySpec = (spec: string) => /^py:[\w.]+:\w+$/.test(spec.trim());
+
+/** The dataset samples matching every word of `q` (in ref, label or group), at most `limit`, grouped in list order. */
+export function sampleGroups(samples: SampleRef[], q: string, limit = 300): { groups: [string, SampleRef[]][]; matched: number; shown: number } {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const hit = samples.filter((s) => words.every((w) => `${s.ref} ${s.label} ${s.group ?? ""}`.toLowerCase().includes(w)));
+  const groups = new Map<string, SampleRef[]>();
+  for (const s of hit.slice(0, limit)) {
+    const g = s.group ?? "";
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g)!.push(s);
+  }
+  return { groups: [...groups], matched: hit.length, shown: Math.min(limit, hit.length) };
+}
 
 /** The banner for a partial capture or an NNsight (module-level) run, or null for a complete TorchLens one. */
 export function captureNote(meta: RunMeta): { tag: "Truncated" | "Selective" | "Modules"; text: string } | null {

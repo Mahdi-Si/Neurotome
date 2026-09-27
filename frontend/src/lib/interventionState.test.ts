@@ -18,6 +18,17 @@ describe("set in the URL", () => {
       expect(parseSet(q(raw))).toBeNull();
     expect(parseSet(q('{"edits":[{"op":"a","kind":"zero"}],"target":-1}'))!.target).toBeNull();
     expect(setParam(null)).toBeNull();
+  });
+  it("rejects edits whose fields have the wrong type (they used to crash editLabel)", () => {
+    for (const bad of [{ kind: "scale", alpha: "2" }, { kind: "constant", value: null, alpha: [1] }, { channels: "0,3" }, { channels: [-1] },
+      { positions: "first" }, { positions: [[1, 2, 3]] }, { kind: "steer", alpha: 1, direction: { kind: "channel", channel: "3" } },
+      { kind: "steer", alpha: 1, direction: { kind: "contrast", run_a: "a" } }, { kind: "resample", seed: 1.5 }]) {
+      const raw = JSON.stringify({ edits: [edit(bad as Partial<Edit>)] });
+      expect(parseSet(q(raw)), raw).toBeNull();
+    }
+    const ok = edit({ kind: "steer", alpha: -1, positions: [[0, 1]], direction: { kind: "contrast", run_a: "a", run_b: "b", pool: "last" } });
+    expect(parseSet(q(JSON.stringify({ edits: [ok] })))!.edits[0]).toEqual(ok);
+    expect(parseSet(q('{"edits":[{"op":"a","kind":"zero"}]}'))!.edits).toHaveLength(1);   // missing scope keys = all
     expect(setParam({ edits: [], target: 1 })).toBeNull();
   });
   it("adds and removes edits; the last one out gives null", () => {

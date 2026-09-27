@@ -39,7 +39,7 @@ def test_synthetic_softmax():
         assert max(max(r) for r in m["map"]) == 1.0
     assert np.asarray(v["full"]["map"]).shape == (10, 10) and v["full"]["max"] == pytest.approx(a[0, 0].max())
     assert v["stats"]["min"] >= 0 and v["stats"]["max"] <= 1 and sum(v["hist"]["counts"]) == 100
-    assert [set(s) for s in v["summary"]] == [{"head", "entropy", "prev", "first", "self", "pattern"}] * 4
+    assert all({"head", "entropy", "prev", "first", "self", "pattern"} <= set(s) for s in v["summary"])
     assert tensor_view(a, channel=2)["head"] == 2 and tensor_view(a, channel=99)["head"] == 3
     assert tensor_view(a, channel=2)["full"]["max"] == pytest.approx(a[0, 2].max())
 
@@ -67,7 +67,7 @@ def test_patterns_and_entropy():
     causal = np.tril(np.ones((T, T), dtype=np.float32))
     v = tensor_view((causal / causal.sum(-1, keepdims=True))[None, None])
     assert v["kind"] == "attention" and v["summary"][0]["first"] == pytest.approx(
-        np.mean(1 / np.arange(1, T + 1))
+        np.mean(1 / np.arange(2, T + 1))  # queries 1..T-1: query 0's weight on itself says nothing
     )
 
 
@@ -83,7 +83,7 @@ def test_non_attention_stays_image():
     assert tensor_view(a * 2)["kind"] == "image"  # rows sum to 2
     assert tensor_view(a - 0.05)["kind"] == "image"  # negative
     assert tensor_view(rng.random((1, 8, 16, 16), dtype=np.float32))["kind"] == "image"
-    assert tensor_view(softmax(rng.normal(size=(1, 4, 10, 12))))["kind"] == "image"  # not square
+    assert tensor_view(softmax(rng.normal(size=(1, 4, 10, 12))) * 2)["kind"] == "image"  # rows sum to 2
     nan = a.copy()
     nan[0, 0, 0, 0] = np.nan
     assert not _is_attention(nan[0]) and tensor_view(nan)["kind"] == "image"

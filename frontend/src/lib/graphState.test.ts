@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { dtypeShort } from "./format";
 import {
-  callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, revealFold, searchIndex, toggleFold, withinGroup,
+  callAddress, colorMode, foldParams, graphDepth, moduleEntry, nodeTones, parseFold, revealFold, searchIndex, toggleFold, withinGroup,
 } from "./graphState";
 import type { GraphNode, GraphView, IndexEntry, InterventionResult, Stats } from "./types";
 
@@ -177,5 +177,15 @@ describe("intervention Δ", () => {
     const { tones } = nodeTones(view([node("c"), node("d")]), "iv", result({ nodes: { c: { ...row(0, 0), nonfinite: 12 }, d: row(1, 0.25) } }));
     expect(tones!.get("c")).toEqual({ v: 1, readout: "12 values changed to or from NaN/inf · finite: ‖Δ‖ 0.00 · rel 0% · cos 0.900 · max|Δ| 0.00" });
     expect(tones!.get("d")!.v).toBe(1);
+  });
+});
+
+describe("depth param", () => {
+  it("is an integer ≥ 0, else 2", () => {
+    const d = (s: string) => graphDepth(new URLSearchParams(s));
+    expect(d("")).toBe(2);
+    expect(d("depth=0")).toBe(0);
+    expect(d("depth=12")).toBe(12);
+    for (const bad of ["depth=abc", "depth=-1", "depth=1.5", "depth=", "depth=1e3"]) expect(d(bad), bad).toBe(2);
   });
 });

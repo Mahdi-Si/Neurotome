@@ -1,3 +1,5 @@
+import type { TopK } from "./types";
+
 export function compact(n: number | null | undefined, digits = 1): string {
   if (n == null || !Number.isFinite(n)) return "—";
   const a = Math.abs(n);
@@ -29,6 +31,10 @@ export function signed(n: number | null | undefined, digits = 3): string {
 
 /** n.toFixed(digits), "—" when missing or non-finite (a probability after an overflowing edit). */
 export const fixed = (n: number | null | undefined, digits = 2) => (n == null || !Number.isFinite(n) ? "—" : n.toFixed(digits));
+
+/** A top output's number: its probability (`p 0.42`), or its raw value when the model's outputs are not logits
+ * (OUTPUT_KIND "values": scores, regression) and the server sent no prob (`value 1.086`). */
+export const outScore = (o: TopK) => (o.prob != null ? `p ${fixed(o.prob)}` : `value ${num(o.logit, 3)}`);
 
 export const shape = (s: number[] | null | undefined) => (s && s.length ? s.join("×") : "—");
 

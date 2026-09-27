@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { api } from "./api";
-import { compact, deltaLarge, fixed, pct, shapeShort, signed } from "./format";
+import { api, detailText } from "./api";
+import { compact, deltaLarge, fixed, outScore, pct, shapeShort, signed } from "./format";
 import { href, parseHash } from "./router";
 
 describe("router", () => {
@@ -11,6 +11,9 @@ describe("router", () => {
     expect(r.tab).toBe("tensors");
     expect(r.params.get("node")).toBe("conv2d_3_8");
     expect(r.params.get("c")).toBe("12");
+  });
+  it("never throws on a malformed escape in the run id", () => {
+    expect(parseHash("#/runs/%E0%A4%A/graph").runId).toBe("%E0%A4%A");
   });
   it("falls back to home and graph", () => {
     expect(parseHash("#/").runId).toBeNull();
@@ -39,6 +42,9 @@ describe("format", () => {
     expect(shapeShort([1, 64, 56, 56])).toBe("64×56×56");
     expect(signed(-0.0514)).toBe("−0.051");
     expect([signed(null), signed(NaN), fixed(null), fixed(0.456), fixed(Infinity, 3)]).toEqual(["—", "—", "—", "0.46", "—"]);
+    // OUTPUT_KIND "values": no prob, the raw value instead
+    expect(outScore({ index: 3, prob: 0.418, logit: 2.5, label: null })).toBe("p 0.42");
+    expect(outScore({ index: 3, prob: null, logit: 1.08623, label: null })).toBe("value 1.086");
     expect([pct(0), pct(0.0042), pct(0.64), pct(null)]).toEqual(["0%", "0.4%", "64%", "—"]);
   });
   it("flags a large IG completeness Δ relative to Σ attributions", () => {
@@ -52,5 +58,15 @@ describe("format", () => {
 describe("api", () => {
   it("versions the input preview by capture time, so a reused run id never shows a stale image", () => {
     expect(api.inputPreviewUrl("run_0007", 1700000000.5)).toBe("/api/runs/run_0007/input.png?v=1700000000.5");
+  });
+});
+
+describe("error detail", () => {
+  it("prints a 422 validation list as readable lines, not JSON", () => {
+    expect(detailText("Unknown op x")).toBe("Unknown op x");
+    expect(detailText([{ type: "greater_than", loc: ["body", "max_capture_mb"], msg: "Input should be greater than 0", input: -5 }]))
+      .toBe("max_capture_mb: Input should be greater than 0");
+    expect(detailText([{ loc: ["body"], msg: "a" }, { msg: "b" }])).toBe("a · b");
+    expect(detailText({ odd: 1 })).toBe('{"odd":1}');
   });
 });

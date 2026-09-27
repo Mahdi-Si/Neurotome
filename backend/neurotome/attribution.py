@@ -23,6 +23,7 @@ import torch
 from torch import nn
 
 from .capture import _out, op_gradients
+from .interventions import channel_axis, per_channel
 from .models import to_logits
 from .tensors import pool2d
 
@@ -44,7 +45,7 @@ def logit_label(target: int, categories: Sequence[str] | None) -> str:
 
 
 def unit_label(path: str, channel: int) -> str:
-    return f"{path} · ch {channel} · Σ spatial"
+    return f"{path} · ch {channel} · Σ positions"
 
 
 def objective_forward(
@@ -52,7 +53,7 @@ def objective_forward(
 ) -> tuple[Callable[[torch.Tensor], torch.Tensor], int | None]:
     """(fwd, target) for Captum. site None -> (logits, None: the caller's target).
     Otherwise a forward hook on the module keeps its ``call``-th output of each forward pass and
-    fwd(x) returns out[:, channel] summed over positions as (B, 1); target 0.
+    fwd(x) returns channel ``channel`` (``channel_axis``) summed over positions as (B, 1); target 0.
     The hook is registered inside fwd and removed in a finally block (never left on the model)."""
     if site is None:
         return (lambda x: to_logits(model(x))), None
@@ -67,7 +68,8 @@ def objective_forward(
         finally:
             handle.remove()
         out = _out(seen[call - 1])
-        return out[:, channel].reshape(out.shape[0], -1).sum(1, keepdim=True)
+        unit = out.select(channel_axis(out.dim()), cast(int, channel))
+        return unit.reshape(out.shape[0], -1).sum(1, keepdim=True)
 
     return fwd, 0
 
@@ -115,9 +117,15 @@ def _reporting(fwd, n: int, label: str, progress: Progress | None):
     return wrapped
 
 
-def input_map(attr: torch.Tensor, delta: float | None) -> dict[str, Any]:
-    """A raw input attribution (same shape as x) as a signed map pooled to <= 24x24 and scaled to [-1, 1]."""
+def input_map(attr: torch.Tensor, delta: float | None, layout: dict[str, Any] | None = None
+              ) -> dict[str, Any]:  # fmt: skip
+    """A raw input attribution (same shape as x) as a signed map scaled to [-1, 1]: a sequence ((1, T, C) or
+    (1, C, T)) as a channel x time map (``series_map``; ``layout``: the run's meta.input: blocks, time, raw),
+    anything else pooled to <= 24x24 (images summed over their channels)."""
     a = attr.detach()[0].to("cpu", torch.float32).numpy()
+    total = float(attr.detach()[0].sum())  # sample 0, like the map
+    if a.ndim == 2:
+        return series_map(a, time_axis(attr.shape, layout), layout or {}, delta, total)
     if a.ndim == 3:  # (C, H, W) -> sum over channels
         a = a.sum(axis=0)
     if a.ndim == 1:
@@ -125,13 +133,91 @@ def input_map(attr: torch.Tensor, delta: float | None) -> dict[str, Any]:
     a = a.reshape(a.shape[0], -1) if a.ndim > 2 else a
     grid = pool2d(a, 24, 24)
     m = float(np.abs(grid).max()) or 1.0
-    total = float(attr.detach().sum())
     return {"map": np.round(grid / m, 3).tolist(), "total": total, "convergence_delta": delta}
+
+
+SERIES_COLS, SERIES_ROWS = 512, 160  # time columns, channel rows: each axis is pooled only above this
+
+
+def time_axis(shape: Sequence[int], layout: dict[str, Any] | None) -> int:
+    """The time axis (1 or 2) of a (1, A, B) input: meta.input.time's, else 1 when blocks group the last axis
+    (load_sample's (1, T, C)), else the longer axis."""
+    info = layout or {}
+    if (t := info.get("time")) and t.get("axis") in (1, 2):
+        return int(t["axis"])
+    if info.get("blocks"):
+        return 1
+    return 1 if shape[1] >= shape[2] else 2  # ponytail: a guess (time is usually longer); `time` settles it
+
+
+def _block(name: str, start: int, stop: int, unit: str | None = None) -> dict[str, Any]:
+    return {"name": name, "start": start, "stop": stop, "labels": None, "unit": unit}
+
+
+def series_blocks(info: dict[str, Any], axis: int, chans: int) -> list[dict[str, Any]]:
+    """The channel groups of a sequence input with time on ``axis``: meta.input.blocks (time on axis 1), else
+    one block per raw signal channel when there are ``chans`` of them (named like the channel), else
+    ``input``."""
+    if axis == 1 and (blocks := info.get("blocks")):
+        return blocks
+    raw = info.get("raw") or {}
+    chs = raw.get("channels", []) if raw.get("kind") == "signal" else []
+    names = [(c["name"], c.get("unit")) for c in chs]
+    return [_block(n, i, i + 1, u) for i, (n, u) in enumerate(names)] if len(names) == chans else [
+        _block("input", 0, chans)]  # fmt: skip
+
+
+def series_map(a: np.ndarray, axis: int, info: dict[str, Any], delta: float | None, total: float
+               ) -> dict[str, Any]:  # fmt: skip
+    """Sample 0 of a sequence attribution as rows = channels, columns = time: sums over ``stride`` steps
+    (only above 512) and ``row_stride`` channels (only above 160), scaled to [-1, 1] (``scale``: the divisor).
+    ``blocks``: ``series_blocks`` with their Σ a, Σ|a| and
+    share of Σ|a|; ``time_totals``: the signed Σ of each column; ``time``: step 0 and the step length in
+    seconds on the run's clock (meta.input.time, or the raw rate when the input is the raw signal)."""
+    m = (a.T if axis == 1 else a).astype(np.float64)  # (C, T)
+    chans, steps = m.shape
+    ts, rs = math.ceil(steps / SERIES_COLS), math.ceil(chans / SERIES_ROWS)
+    grid = np.add.reduceat(np.add.reduceat(m, np.arange(0, chans, rs), 0), np.arange(0, steps, ts), 1)
+    top = float(np.abs(grid).max()) or 1.0
+    per = np.abs(m).sum(1)
+    whole = float(per.sum()) or 1.0
+    raw = info.get("raw") or {}
+    raw = raw if raw.get("kind") == "signal" else {}
+    blocks = series_blocks(info, axis, chans)
+    t, label = info.get("time"), raw.get("time_label") or "s"
+    if t and t.get("axis") == axis:
+        time = {"t0": float(t["t0"]), "step_s": float(t["step_s"]), "label": label}
+    elif raw and all(c.get("length") == steps for c in raw["channels"]):  # the input is the raw signal
+        time = {"t0": float(raw["t0"]), "step_s": 1 / float(raw["fs"]), "label": label}
+    else:
+        time = None
+    short = lambda v: float(f"{v:.6g}")  # noqa: E731
+    out = []
+    for b in sorted(blocks, key=lambda b: b["start"]):
+        part = slice(b["start"], b["stop"])
+        out.append({**_block(b["name"], b["start"], b["stop"], b.get("unit")), "labels": b.get("labels"),
+                    "sum": short(m[part].sum()), "abs": short(per[part].sum()),
+                    "share": float(per[part].sum()) / whole})  # fmt: skip
+    return {
+        "kind": "series",
+        # 3 significant digits, not decimals: an unpooled map has many small cells whose sum still counts
+        "map": [[float(f"{v:.3g}") for v in row] for row in (grid / top).tolist()],
+        "scale": top,  # map * scale = Σ a of each cell
+        "total": total,
+        "convergence_delta": delta,
+        "channels": chans,
+        "row_stride": rs,
+        "steps": steps,
+        "stride": ts,
+        "time": time,
+        "blocks": out,
+        "time_totals": [short(v) for v in grid.sum(0)],
+    }
 
 
 def input_attribution(
     model, x: torch.Tensor, target: int | None, method: str, steps: int, fwd=None,
-    progress: Progress | None = None,
+    progress: Progress | None = None, layout: dict[str, Any] | None = None,
 ) -> dict[str, Any]:  # fmt: skip
     from captum.attr import InputXGradient, IntegratedGradients, Saliency
 
@@ -155,7 +241,7 @@ def input_attribution(
         attr = InputXGradient(fwd).attribute(x, target=target)
     else:
         raise ValueError(f"Unknown method {method!r}; choose one of {sorted(METHODS)}")
-    return input_map(attr, delta)
+    return input_map(attr, delta, layout)
 
 
 def input_note(x: Any, method: str) -> str | None:
@@ -233,6 +319,7 @@ def attribute(
     progress: Progress | None = None,
     baseline_id: int = 0,
     grads=op_gradients,
+    layout: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``unit_ops``: op ids eligible for the top-units list (default: every op with a channel axis).
     The run manager passes ops that own parameters, so BatchNorm/ReLU copies of the same channel
@@ -240,7 +327,8 @@ def attribute(
     ``objective`` ``{"op", "channel"}`` explains that unit instead of a logit (``target`` is ignored);
     ``site`` is its module call (``graph.module_site``), which the input methods hook.
     Integer inputs (token ids) get ``tokens`` (the method on the embedding layer, IG from ``baseline_id``)
-    instead of an input map. ``grads`` is the capture backend's ``op_gradients``.
+    instead of an input map. ``grads`` is the capture backend's ``op_gradients``; ``layout`` the run's
+    meta.input (blocks / time / raw of a sequence input, see ``input_map``).
     The result also carries ``channel_scores`` for the run manager, which keeps them server-side."""
     model.eval()
     x = inputs[0] if isinstance(inputs, (tuple, list)) else inputs
@@ -272,7 +360,7 @@ def attribute(
             note = None
             tokens = token_attribution(model, x, tgt, method, steps, fwd, emb[1], emb[0], baseline_id, sub)
         else:
-            input_attr = input_attribution(model, x, tgt, method, steps, fwd, sub)
+            input_attr = input_attribution(model, x, tgt, method, steps, fwd, sub, layout)
 
     top_units = []
     for op_id, chans in internal["channel_scores"].items():
@@ -315,7 +403,7 @@ def layer_attribution(
     model, x: torch.Tensor, layer: torch.nn.Module, method: str, fwd, target: int | None, steps: int,
     progress: Progress | None = None,
 ) -> dict[str, Any]:  # fmt: skip
-    """Captum layer IG / conductance on ``layer``'s output, summed per channel (axis 1)."""
+    """Captum layer IG / conductance on ``layer``'s output, summed per channel (``channel_axis``)."""
     from captum.attr import LayerConductance, LayerIntegratedGradients
 
     if method not in LAYER_METHODS:
@@ -333,7 +421,7 @@ def layer_attribution(
         return_convergence_delta=True,
     )
     a = _out(attr).detach()[0].float()
-    chans = (a.flatten(1).sum(1) if a.dim() >= 2 else a).cpu()
+    chans = (per_channel(a) if a.dim() >= 2 else a).cpu()
     order = chans.abs().argsort(descending=True, stable=True)[:12]
     return {
         "channels": chans.tolist(),
@@ -368,7 +456,8 @@ def channel_conductance(
                 f = fwd(xs)[:, target]
                 y = _out(kept[0])
                 g = torch.autograd.grad(f.sum(), y, retain_graph=True)[0].detach()
-                s = (g[:, channel] * y[:, channel]).sum()
+                ax = channel_axis(y.dim())
+                s = (g.select(ax, channel) * y.select(ax, channel)).sum()
                 acc += torch.autograd.grad(s, xs)[0].sum(0)
         finally:
             handle.remove()
@@ -393,7 +482,8 @@ def agreement(
     n = min(np.asarray(v).size for v in vectors.values())
     mags = [np.abs(np.asarray(vectors[m], dtype=np.float64).ravel()[:n]) for m in methods]
     k = max(1, math.ceil(k_frac * n))
-    tops = [set(np.argsort(-a, kind="stable")[:k].tolist()) for a in mags]
+    # a zero is in no top set: ties among zeros would otherwise fill it by index and look like agreement
+    tops = [{i for i in np.argsort(-a, kind="stable")[:k].tolist() if a[i] > 0} for a in mags]
     ranks = [_avg_ranks(a) for a in mags]
     size = len(methods)
     jac = [[1.0] * size for _ in range(size)]
@@ -402,7 +492,8 @@ def agreement(
     for i in range(size):
         for j in range(i + 1, size):
             inter = len(tops[i] & tops[j])
-            jac[i][j] = jac[j][i] = inter / len(tops[i] | tops[j])
+            union = len(tops[i] | tops[j])
+            jac[i][j] = jac[j][i] = inter / union if union else 1.0  # both all zero
             ovl[i][j] = ovl[j][i] = inter / k
             ri, rj = ranks[i] - ranks[i].mean(), ranks[j] - ranks[j].mean()
             den = math.sqrt(float((ri * ri).sum() * (rj * rj).sum()))

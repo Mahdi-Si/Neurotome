@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { cellsOf, divergeIndex, editable, genReadout, sameModelRuns, toggleCells, topReadout } from "./composeState";
-import type { GenerationResult, RunMeta, TopK } from "./types";
+import { cellsOf, divergeIndex, editable, genReadout, moduleSites, sameModelRuns, toggleCells, topReadout } from "./composeState";
+import type { GenerationResult, GraphNode, GraphView, RunMeta, TopK } from "./types";
 
 describe("pixel selection on pooled cells", () => {
   it("adds every pixel of a cell, then removes them", () => {
@@ -69,5 +69,34 @@ describe("editable nodes and top-k readout", () => {
     expect(topReadout(before, after, 3)).toBe('before #2 "cat" 0.12 → after #1 0.41');
     expect(topReadout(before, [k(7, 0.9)], 7)).toBe('before — "[7]" — → after #1 0.90');
     expect(topReadout(before, [{ index: 3, prob: null, logit: null, label: "cat" }], 3)).toBe('before #2 "cat" 0.12 → after #1 —');
+  });
+});
+
+describe("module sites (the server's edit label paths)", () => {
+  // a BasicBlock at full depth: conv (leaf) → relu (leaf, call 1) → conv2 (leaf) → add → relu (leaf, call 2) → head (leaf)
+  const n = (id: string, path: string, group: string | null): GraphNode => ({
+    id, kind: "op", label: id, path, type: id, num_ops: 1, num_params: 0, output_op: id, shape: [1, 4], flops: 0,
+    stats: null, group, is_input: false, is_output: false,
+  });
+  const g = "g:layer.0:1";
+  const view: GraphView = {
+    depth: 12, groups: [{ id: g, address: "layer.0", class_name: "BasicBlock", num_params: 0, parent: null, num_ops: 5 }],
+    nodes: [n("conv_1", "layer.0.conv1", g), n("relu_1", "layer.0.relu", g), n("conv_2", "layer.0.conv2", g),
+      n("add_1", "add_1", g), n("relu_2", "layer.0.relu", g), n("mean_1", "mean_1", null)],
+    edges: [["conv_1", "relu_1"], ["relu_1", "conv_2"], ["conv_2", "add_1"], ["add_1", "relu_2"], ["relu_2", "mean_1"]]
+      .map(([source, target]) => ({ source, target, shape: [1, 4] })),
+  };
+  it("names leaf calls (@n after the first), then the innermost group an op leaves", () => {
+    const { path, op } = moduleSites(view);
+    expect(path.get("relu_1")).toBe("layer.0.relu");
+    expect(path.get("relu_2")).toBe("layer.0.relu@2");   // also the block's output: the leaf is innermost
+    expect(path.get("add_1")).toBeUndefined();
+    expect(path.get("mean_1")).toBeUndefined();
+    expect(op.get("m:layer.0:1")).toBe("relu_2");
+    expect(op.get("m:layer.0.relu:2")).toBe("relu_2");
+    // without the leaf relu, the add is the block's output and takes the block's name
+    const noRelu: GraphView = { ...view, nodes: view.nodes.filter((x) => x.id !== "relu_2"),
+      edges: [...view.edges.filter((e) => e.target !== "relu_2" && e.source !== "relu_2"), { source: "add_1", target: "mean_1", shape: [1, 4] }] };
+    expect(moduleSites(noRelu).path.get("add_1")).toBe("layer.0");
   });
 });

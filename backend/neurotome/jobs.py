@@ -48,7 +48,7 @@ class Job:
 
 # ponytail: one worker, in-memory jobs (captures included); persist or add GPU/CPU lanes when needed.
 class JobRunner:
-    def __init__(self, keep: int = 100, describe: Callable[[Exception], str] | None = None):
+    def __init__(self, keep: int = 100, describe: Callable[[BaseException], str] | None = None):
         """``describe`` turns a job's exception into its ``error`` text (default: the exception's message)."""
         self.keep = keep
         self.describe = describe
@@ -135,7 +135,8 @@ class JobRunner:
                 result = fn(progress)
             except Cancelled:
                 changes = {"status": "cancelled"}
-            except Exception as e:  # noqa: BLE001 - any failure is reported on the job
+            except BaseException as e:  # noqa: BLE001 - any failure (a py: module's sys.exit too) is reported
+                # on the job; letting SystemExit through would end the worker and strand every later job
                 error = self.describe(e) if self.describe else str(e) or type(e).__name__
                 changes = {"status": "error", "error": error}
             else:

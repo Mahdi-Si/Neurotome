@@ -2,12 +2,13 @@ import { useMemo, useState } from "react";
 import { CaptureBanner } from "../components/CaptureBanner";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { GraphSearch } from "../components/GraphSearch";
+import { useSideWidth } from "../components/SideResize";
 import { InterventionBanner } from "../components/InterventionBanner";
 import { Inspector, ModuleTree } from "../components/panels";
 import { TopBar } from "../components/TopBar";
 import { api } from "../lib/api";
 import {
-  callAddress, colorMode, foldParams, moduleEntry, nodeTones, parseFold, revealFold, toggleFold, withinGroup,
+  callAddress, colorMode, foldParams, graphDepth, moduleEntry, nodeTones, parseFold, revealFold, toggleFold, withinGroup,
 } from "../lib/graphState";
 import { parseSet, setParam } from "../lib/interventionState";
 import { useJob } from "../lib/jobs";
@@ -36,7 +37,8 @@ const COLOURS: { id: ColorMode; label: string }[] = [
 ];
 
 export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
-  const depth = Number(route.params.get("depth") ?? 2);
+  const [sideW, sideHandle] = useSideWidth("graph", 400);
+  const depth = graphDepth(route.params);
   const color = colorMode(route.params);
   const attr = color === "attr";
   const fold = parseFold(route.params);
@@ -59,15 +61,17 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
     navigate(href(run.id, "graph", { ...p, iv: r.hash, color: "iv" }), true);
   };
 
-  const selectedId = route.params.get("node");
+  const selectedId = route.params.get("node") || null;
   const selected = useMemo(() => {
     if (!view) return null;
     const byId = (id: string | null) => (id ? view.nodes.find((n) => n.id === id) : undefined);
     return byId(selectedId)
       ?? view.nodes.find((n) => n.output_op === selectedId)
       ?? (selectedId?.startsWith("m:") ? byId(pickNodeForModule(view, callAddress(selectedId))) : undefined)
+      // an op folded into a collapsed module (a link from Tensors / Trace): the module node that holds it
+      ?? byId([...(index.data?.find((e) => e.id === selectedId)?.calls ?? [])].reverse().map((c) => "m:" + c).find((id) => byId(id)) ?? null)
       ?? view.nodes.find((n) => !n.is_input) ?? null;
-  }, [view, selectedId]);
+  }, [view, selectedId, index.data]);
   // focus (and search centring) waits until the requested node is really in the view, not a fallback
   const exact = !!selected && (!selectedId || selected.id === selectedId || selected.output_op === selectedId);
   const { tones, legend } = useMemo(() => (view ? nodeTones(view, color, ivResult) : { tones: undefined, legend: null }), [view, color, ivResult]);
@@ -83,7 +87,7 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
   };
   const onOpen = (id: string) => {
     const n = view?.nodes.find((x) => x.id === id);
-    if (n) navigate(href(run.id, "tensors", { node: n.output_op }));
+    if (n) navigate(href(run.id, "tensors", { node: n.output_op, iv }));
   };
   const onPick = (e: IndexEntry) => {
     go({ ...foldParams(revealFold(fold, e)), node: e.id });
@@ -102,7 +106,7 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
 
   return (
     <>
-      <TopBar run={run} tab="graph" node={selected?.id} carry={{ iv, set: setParam(set) }}>
+      <TopBar run={run} tab="graph" node={selected?.id} op={selected?.output_op} carry={{ iv, set: setParam(set) }}>
         <span style={pair}><span className="lbl dim">Depth</span>
         <div className="seg lbl" role="group" aria-label="Nesting depth">
           {[0, 1, 2, 3, 4].map((d) => (
@@ -159,7 +163,8 @@ export function GraphViewPage({ run, route }: { run: RunMeta; route: Route }) {
           <GraphSearch entries={index.data} error={index.error} query={query} onQuery={setQuery} onPick={onPick} />
           {graph.loading && !view && <div className="empty lbl">Loading graph…</div>}
         </section>
-        <aside className="panel" style={{ width: 360, flexShrink: 0, borderLeft: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
+        {sideHandle}
+        <aside className="panel" style={{ width: sideW, flexShrink: 0, borderLeft: "1px solid var(--line)", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {view && <Inspector runId={run.id} view={view} node={selected} total={view.nodes.length}
             linkFor={(id) => href(run.id, "graph", state({ node: id }))}
             intervention={{

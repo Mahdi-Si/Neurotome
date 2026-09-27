@@ -4,9 +4,9 @@ import { api } from "../lib/api";
 import { exportLayers } from "../lib/exportPng";
 import { num } from "../lib/format";
 import type { RunMeta } from "../lib/types";
-import { HeatCanvas, Readout, cellAt, pngName } from "./charts";
+import { Axes, HeatCanvas, Readout, axisText, cellAt, pngName, type AxisRange } from "./charts";
 
-export function InputOverlay({ run, grid, signed, alpha, label, exportName, onPick, mark, readout }: {
+export function InputOverlay({ run, grid, signed, alpha, label, exportName, onPick, mark, readout, x, y }: {
   run: RunMeta;
   grid: number[][];
   signed: boolean;
@@ -16,6 +16,7 @@ export function InputOverlay({ run, grid, signed, alpha, label, exportName, onPi
   onPick?: (r: number, c: number) => void;
   mark?: [number, number] | null;
   readout?: (r: number, c: number, v: number) => string;
+  x?: AxisRange; y?: AxisRange;   // the map's real column / row ranges
 }) {
   const img = useRef<HTMLImageElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -26,10 +27,11 @@ export function InputOverlay({ run, grid, signed, alpha, label, exportName, onPi
   const text = (r: number, c: number, v: number) => (readout ? readout(r, c, v) : `cell (${r}, ${c}) · ${num(v, 3)}`);
   const onExport = async () => {
     const map = box.current?.querySelector("canvas");
-    if (img.current && map) await exportLayers([{ el: img.current, alpha: 1 }, { el: map, alpha }], pngName(exportName, label));
+    if (img.current && map) await exportLayers([{ el: img.current, alpha: 1 }, { el: map, alpha }], pngName(exportName, label), axisText({ x, y }));
   };
   return (
     <div>
+      <Axes x={x} y={y}>
       <div ref={box} style={{ position: "relative" }}
         onMouseMove={(e) => rows && cols && setHover(cellAt(e, rows, cols))} onMouseLeave={() => setHover(null)}>
         <img ref={img} src={api.inputPreviewUrl(run.id, run.created)} alt="Input preview"
@@ -40,6 +42,7 @@ export function InputOverlay({ run, grid, signed, alpha, label, exportName, onPi
             style={{ height: "100%", opacity: alpha, imageRendering: "auto" }} />
         </div>
       </div>
+      </Axes>
       <Readout text={hover && hv != null ? text(hover[0], hover[1], hv) : null} label={label} onExport={onExport} />
     </div>
   );

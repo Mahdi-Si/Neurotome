@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 __all__ = ["open", "__version__"]
+_servers: dict[int, tuple[Any, Any]] = {}  # port -> (RunManager, server thread) of open(block=False) calls
 
 
 def open(
@@ -27,7 +28,8 @@ def open(
     """Capture ``model(inputs)`` as a new run and serve the UI.
 
     ``block=False`` starts the server in a background thread (useful in notebooks)
-    and returns the run URL immediately. ``tokenizer`` (``encode`` / ``decode``, e.g. a Hugging Face
+    and returns the run URL immediately; calling ``open`` again on that port adds the run to the running
+    server. ``tokenizer`` (``encode`` / ``decode``, e.g. a Hugging Face
     tokenizer) labels token ids and, for a causal LM, enables the logit lens.
     """
     import threading
@@ -39,14 +41,22 @@ def open(
     from .runs import RunManager
 
     st = get_settings()
-    mgr = RunManager.from_settings(st)
-    meta = mgr.create_from_objects(model, inputs, name=name, categories=categories, tokenizer=tokenizer)
     port = port or st.port
+    # a second call reuses the server this process already runs on the port: a new server could not bind
+    # it, and the running one would not hold the new run's model
+    running = _servers.get(port)
+    running = running if running and running[1].is_alive() else None
+    mgr = running[0] if running else RunManager.from_settings(st)
+    meta = mgr.create_from_objects(model, inputs, name=name, categories=categories, tokenizer=tokenizer)
     url = f"http://{st.host}:{port}/#/runs/{meta['id']}/graph"
     print(f"Neurotome -> {url}")
+    if running:
+        return url
     server = uvicorn.Server(uvicorn.Config(create_app(mgr), host=st.host, port=port, log_level="warning"))
     if block:
         server.run()
     else:
-        threading.Thread(target=server.run, daemon=True).start()
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        _servers[port] = (mgr, thread)
     return url

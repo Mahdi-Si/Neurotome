@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import importlib
 import io
-import json
 import math
 import random
 import shutil
 import threading
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -29,6 +28,8 @@ from .attribution import (
     layer_attribution,
     logit_label,
     objective_forward,
+    series_blocks,
+    time_axis,
     unit_label,
 )
 from .capture import capture
@@ -38,6 +39,7 @@ from .interventions import (
     CH_AXIS,
     GEN_KINDS,
     MAX_NEW_TOKENS,
+    channel_axis,
     downstream,
     edit_fn,
     keep_ops,
@@ -56,6 +58,7 @@ from .models import (
     is_hf,
     is_lm,
     load_model,
+    target_windows,
     to_logits,
     vocab_size,
 )
@@ -99,7 +102,9 @@ class RunManager:
     def save_upload(self, filename: str, data: bytes) -> str:
         import hashlib
 
-        suffix = Path(filename).suffix.lower()[:8] or ".bin"
+        suffix = Path(filename).suffix.lower()
+        # only the suffixes build_input reads (images are sniffed by PIL): never an importable .py / .pyd
+        suffix = suffix if suffix in (".pt", ".pth", ".npy") else ".img"
         uid = hashlib.sha1(data).hexdigest()[:12] + suffix
         (self.uploads / uid).write_bytes(data)
         return uid
@@ -110,7 +115,7 @@ class RunManager:
             uid = Path(sample["upload_id"]).name
             path = self.uploads / uid
             if path.suffix in (".pt", ".pth"):
-                x = torch.load(path, map_location="cpu")
+                x = torch.load(path, map_location="cpu", weights_only=True)  # an upload: never unpickle code
                 return x, {"kind": "tensor", "name": sample.get("name") or uid}
             if path.suffix == ".npy":
                 a = np.load(path)
@@ -155,8 +160,14 @@ class RunManager:
         except (ImportError, AttributeError, KeyError, TypeError, OSError) as e:
             raise ValueError(f"Cannot load model {spec!r}: {type(e).__name__}: {e}") from e
         report(0.08, "Build input")
+        if sample.get("kind") == "ref":
+            x, sample_meta, got = _ref_input(loaded, str(sample.get("ref") or ""))
+            extra = {k: got[k] for k in ("raw", "steps", "blocks", "time")}
+            return self._create(loaded, x, sample_meta, modules, max_capture_mb, progress, backend, **extra)
         x, sample_meta = self.build_input(loaded, sample)
-        return self._create(loaded, x, sample_meta, modules, max_capture_mb, progress, backend)
+        raw = self.uploads / Path(sample["upload_id"]).name if sample_meta["kind"] == "image" else None
+        return self._create(loaded, x, sample_meta, modules, max_capture_mb, progress, backend,
+                            raw=raw, steps=_steps(loaded, sample_meta))  # fmt: skip
 
     def create_from_objects(
         self,
@@ -195,6 +206,8 @@ class RunManager:
             raise ValueError(f"Upload {sample.get('upload_id')} not found; upload the file again")
         if sample.get("kind") == "text" and not sample.get("text"):
             raise ValueError("Text sample needs text")
+        if sample.get("kind") == "ref" and not sample.get("ref"):
+            raise ValueError("A dataset sample needs its ref")
         _check_backend(backend)
         run = lambda p: self.create_from_spec(spec, weights, sample, modules, max_capture_mb, p, backend)  # noqa: E731
         return self.jobs.submit("capture", run)
@@ -208,7 +221,13 @@ class RunManager:
         max_capture_mb: float | None = None,
         progress: Progress | None = None,
         backend: str | None = None,
+        raw: Path | dict[str, Any] | None = None,
+        steps: list[str] | None = None,
+        blocks: list[dict[str, Any]] | None = None,
+        time: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """``raw``: the uploaded image, copied into the run as it was, or a checked signal (``load_sample``);
+        ``steps``: what preprocessing did; ``blocks`` / ``time``: the input's column groups and time axis."""
         modules = [m.strip() for m in modules or [] if m.strip()] or None
         if max_capture_mb is not None and not (math.isfinite(max_capture_mb) and max_capture_mb > 0):
             raise ValueError(f"max_capture_mb must be a positive finite number, got {max_capture_mb}")
@@ -225,8 +244,12 @@ class RunManager:
                 (progress or _quiet)(0.93, "Summarise")
                 cpu = _to_device(inputs, "cpu")
                 torch.save(cpu, run_dir / "inputs.pt")
-                preview = _save_preview(cpu, loaded.norm if sample_meta["kind"] == "image" else None, run_dir)
-                top, output_error = _top_k(loaded, inputs)
+                norm = loaded.norm if sample_meta["kind"] == "image" else None
+                preview = _save_preview(cpu, norm, run_dir)
+                raw_meta = _save_raw(raw, run_dir)
+                top, output_error, vec = _top_k(loaded, inputs)
+                if vec is not None:
+                    np.save(run_dir / OUTPUT, vec)
             except Exception as e:  # Cancelled and CUDA OOM included: no half-written run is left
                 self.store.delete(run_id)
                 if isinstance(e, torch.cuda.OutOfMemoryError):
@@ -242,6 +265,9 @@ class RunManager:
                 "output": top,
                 "output_error": output_error,
                 "preview": preview,
+                # the Input view: the raw sample, the preprocessing in words, the (mean, std) it used
+                "input": {"raw": raw_meta, "steps": steps, "norm": [list(v) for v in norm] if norm else None,
+                          "blocks": blocks, "time": time},  # fmt: skip
                 "categories": loaded.categories if isinstance(loaded.categories, list) else None,
                 "reloadable": loaded.spec is not None,
                 "status": "ready",
@@ -307,19 +333,60 @@ class RunManager:
         inputs = torch.load(self.store.run_dir(run_id) / "inputs.pt", map_location=self.device)
         return self._keep_live(run_id, Live(loaded, inputs))
 
+    # ---- the output and the input windows of one output element (the Trace target) ----
+    def output(self, run_id: str) -> dict[str, Any]:
+        """Every output element (``to_logits`` of sample 0) with its label (``output_view``): output.npy,
+        saved at capture; a run captured before it gets one forward pass of its live model, then the file."""
+        path = self.store.run_dir(run_id) / OUTPUT
+        if not path.is_file():
+            with self._lock:
+                live = self.live(run_id)
+                with torch.no_grad():
+                    vec = to_logits(live.loaded.model(*_args(live.inputs)))[0].float().cpu().numpy()
+            np.save(path, vec)
+        return output_view(np.load(path), self.store.meta(run_id).get("categories"))
+
+    def windows(self, run_id: str, index: int) -> dict[str, Any]:
+        """The input windows of output element ``index``: the run's py: module's ``target_windows(index)``
+        (imported, the model is not built), checked by ``check_windows``; a failure is the reply's
+        ``error``."""
+        meta = self.store.meta(run_id)
+        spec = meta["model"].get("spec")
+        try:
+            got = target_windows(spec, index) if spec else []
+        except Exception as e:  # noqa: BLE001 - arbitrary module code: its message, never a 500
+            return {"windows": [], "error": f"target_windows({index}) failed: {type(e).__name__}: {e}"}
+        try:
+            windows = check_windows(got, meta.get("input_shape"), meta.get("input") or {})
+            return {"windows": windows, "error": None}
+        except ValueError as e:
+            return {"windows": [], "error": str(e)}
+
     # ---- attribution: every kind below also runs as a job (see job()) -----
     def _cached(self, run_id: str, name: str) -> Any:
-        """The cached result, or None when missing or stale: attribution files before M3 have no merges, and
-        before v0.2 an integer-input run got no ``tokens``."""
+        """The cached result, or None when missing or stale: attribution files before M3 have no merges,
+        before v0.2 an integer-input run got no ``tokens``, and before 0.3.0 the channels of a (B, T, D)
+        tensor were its tokens (now its features, as in interventions; results carry ``seq_channels``), and a
+        sequence input's map was a 24x24 grid, then channel x time pooled to 128 columns, now unpooled up to
+        512 steps (results carry ``input_map``)."""
         try:
             data = self.store.read_json(run_id, name)
         except KeyError:
             return None
-        if name.split("/")[-1].split("_")[0] in METHODS:
+        kind = name.split("/")[-1].split("_")[0]
+        if kind in (*METHODS, "layer", "neuron", "agreement") and data.get("seq_channels") != SEQ_CHANNELS:
+            return None
+        if kind in (*METHODS, "neuron", "agreement") and data.get("input_map") != INPUT_MAP:
+            return None
+        if kind in METHODS:
             old = "tokens" not in data and data.get("input") is None and self._int_input(run_id)
             if "merges" not in data or old:
                 return None
         return data
+
+    def _layout(self, run_id: str) -> dict[str, Any]:
+        """The run's meta.input (blocks, time, raw): how a sequence input's attribution map is labelled."""
+        return self.store.meta(run_id).get("input") or {}
 
     def _int_input(self, run_id: str) -> bool:
         return any(o["is_input"] and "int" in (o.get("dtype") or "") for o in self.store.ir(run_id)["ops"])
@@ -393,12 +460,16 @@ class RunManager:
                 progress,
                 _baseline_id(live.loaded.tokenizer),
                 self._backend(run_id).op_gradients,
+                self._layout(run_id),
             )
+            if live.loaded.output_kind == "values":  # scores, not logits: their softmax is no probability
+                result["prob"] = None
         where = {o["id"]: o.get("module") or o["id"] for o in ir["ops"]}
         for u in result["top_units"]:
             u["path"] = where.get(u["op"], u["op"])
         if site and objective:
             result["objective_label"] = unit_label(site[0], int(objective["channel"]))
+        result["seq_channels"], result["input_map"] = SEQ_CHANNELS, INPUT_MAP
         channels = result.pop("channel_scores")
         self.store.write_json(run_id, f"attribution/channels_{okey(target, objective)}.json", channels)
         self.store.write_json(run_id, name, result)
@@ -435,6 +506,7 @@ class RunManager:
             "objective_label": label,
             "steps": steps,
             **res,
+            "seq_channels": SEQ_CHANNELS,
         }
         self.store.write_json(run_id, name, result)
         return result
@@ -457,7 +529,7 @@ class RunManager:
             ir = self.store.ir(run_id)
             address, _ = self._layer_site(ir, op)
             shape = next(o["shape"] for o in ir["ops"] if o["id"] == op)
-            if len(shape) < 2 or not 0 <= channel < shape[1]:
+            if len(shape) < 2 or not 0 <= channel < shape[channel_axis(len(shape))]:
                 raise ValueError(f"Channel {channel} out of range for {op} with shape {shape}")
             fwd, t, label = self._objective(live, ir, target, objective, op)
             model = live.loaded.model
@@ -472,7 +544,9 @@ class RunManager:
             "channel": channel,
             "objective_label": label,
             "steps": steps,
-            "input": input_map(attr, None),
+            "input": input_map(attr, None, self._layout(run_id)),
+            "seq_channels": SEQ_CHANNELS,
+            "input_map": INPUT_MAP,
         }
         self.store.write_json(run_id, name, result)
         return result
@@ -502,7 +576,8 @@ class RunManager:
         res = {m: self.attribution(run_id, m, target, steps, objective, part(i, m))
                for i, m in enumerate(METHODS)}  # fmt: skip
         maps = {m: np.asarray(r["input"]["map"]) for m, r in res.items() if r["input"]}
-        basis = "|attribution| · 24×24 pooled input map"
+        series = any(r["input"].get("kind") == "series" for r in res.values() if r["input"])
+        basis = f"|attribution| · {'channel × time' if series else '24×24 pooled'} input map"
         if not maps:
             maps = {m: np.asarray(r["tokens"]["scores"]) for m, r in res.items() if r.get("tokens")}
             basis = "|attribution| · per token"
@@ -534,6 +609,8 @@ class RunManager:
             "input": block,
             "units": units,
             "units_error": "; ".join(errors) or None,
+            "seq_channels": SEQ_CHANNELS,
+            "input_map": INPUT_MAP,
         }
         self.store.write_json(run_id, name, result)
         return result
@@ -629,7 +706,9 @@ class RunManager:
         ops = {e["op"] for e in norm["edits"]}
         edited = [o["id"] for o in ir["ops"] if o["id"] in ops]
         down = downstream(ir, edited)
-        budget = ir["model"].get("budget_bytes") or self.max_capture_bytes
+        # the capture's own budget (0 is a budget too); the server's when the capture recorded none
+        budget = ir["model"].get("budget_bytes")
+        budget = self.max_capture_bytes if budget is None else budget
         saved, truncated = keep_ops(ir, down, budget)
         edits = [(e["op"], edit_fn(e, v)) for e, (v, _, _) in zip(norm["edits"], resolved, strict=True)]
         backend = self.store.meta(run_id)["model"].get("backend") or "torchlens"
@@ -751,7 +830,8 @@ class RunManager:
     def interventions(self, run_id: str) -> list[dict[str, Any]]:
         """InterventionSummary rows, newest first (folders without meta.json are generate-only: skipped)."""
         root = self.store.run_dir(run_id) / "interventions"
-        rows = [json.loads(p.read_text()) for p in sorted(root.glob("*/meta.json"))] if root.is_dir() else []
+        metas = sorted(root.glob("*/meta.json")) if root.is_dir() else []
+        rows = [self.store.read_json(run_id, f"interventions/{p.parent.name}/meta.json") for p in metas]
         return sorted(
             ({k: r.get(k) for k in SUMMARY} for r in rows), key=lambda r: r["created"] or 0, reverse=True
         )
@@ -876,6 +956,10 @@ class RunManager:
 
 
 UNIT_WHY = "unit objectives hook module outputs"
+SEQ_CHANNELS = "features"  # (B, T, D) channels are features (axis 2); stamped on cached results
+# a sequence input's map is channel x time, time pooled only above 512 steps; stamped on attribution /
+# neuron / agreement results (older stamps are recomputed)
+INPUT_MAP = "series-512"
 NOT_LM = "Logit lens needs a causal language model with a tokenizer; this run's model is not one."
 NOT_LM_GEN = "Generation needs a causal language model with a tokenizer; this run's model is not one."
 IV_LABELS = {"torchlens": "Intervention · TorchLens capture-time hooks (every op)",
@@ -949,6 +1033,99 @@ def _text_input(loaded: LoadedModel, text: str) -> tuple[torch.Tensor, dict[str,
     if len(ids) > limit:
         raise ValueError(f"The text is {len(ids)} tokens; this model takes at most {limit}")
     return torch.tensor([ids], dtype=torch.int64), {"kind": "text", "name": text[:60], "text": text}
+
+
+MAX_REF = 512
+
+
+def _ref_input(loaded: LoadedModel, ref: str) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    """(inputs, sample meta, checked raw / steps / blocks / time) of a dataset sample: the model module's
+    ``load_sample(ref)``, checked so that a bad return names what is wrong (ValueError: HTTP 400)."""
+    if not 0 < len(ref) <= MAX_REF:
+        raise ValueError(f"A sample ref is 1–{MAX_REF} characters")
+    if loaded.load_sample is None:
+        raise ValueError(f"{loaded.spec} defines no load_sample(ref); dataset samples need that module hook")
+    try:
+        got = loaded.load_sample(ref)
+    except Exception as e:  # noqa: BLE001 - an unknown ref, a missing file: the module's own message
+        raise ValueError(f"load_sample({ref!r}) failed: {type(e).__name__}: {e}") from e
+    x, meta, extra = _check_sample(got, ref)
+    module = (loaded.spec or "").removeprefix("py:").rpartition(":")[0]
+    extra["steps"] = extra["steps"] or [f"Custom: {module}.load_sample"]
+    return x, meta, extra
+
+
+def _check_sample(got: Any, ref: str) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    def bad(why: str) -> ValueError:
+        return ValueError(f"load_sample({ref!r}) {why}")
+
+    if not isinstance(got, dict):
+        raise bad(f"returned {type(got).__name__}; it must return a dict with 'input'")
+    x = got.get("input")
+    xs = tuple(x) if isinstance(x, (tuple, list)) else (x,)
+    if not xs or not all(torch.is_tensor(t) for t in xs):
+        raise bad("must return 'input': a tensor or a tuple of tensors (batch of 1)")
+    first = cast(torch.Tensor, xs[0])
+    x = xs if isinstance(x, (tuple, list)) else first
+    steps = got.get("steps")
+    if steps is not None and not (isinstance(steps, list) and all(isinstance(s, str) for s in steps)):
+        raise bad("'steps' must be a list of str")
+    info = got.get("info") or {}
+    if not isinstance(info, dict):
+        raise bad("'info' must be a dict")
+    info = {str(k): v if v is None or isinstance(v, (str, int, float)) else str(v) for k, v in info.items()}
+    raw, blocks, time = got.get("raw"), got.get("blocks"), got.get("time")
+    raw = None if raw is None else _check_raw(raw, bad)
+    if blocks is not None:
+        if first.dim() != 3 or not isinstance(blocks, list):
+            raise bad(f"'blocks' group the last axis of a (1, T, C) input; the input is {list(first.shape)}")
+        blocks = [_check_block(b, first.shape[-1], bad) for b in blocks]
+    if time is not None:
+        try:
+            axis, step, t0 = int(time["axis"]), float(time["step_s"]), float(time.get("t0", 0.0))
+        except (TypeError, KeyError, ValueError, AttributeError):
+            raise bad("'time' must be {'axis': int, 'step_s': float, 't0': float}") from None
+        if not (0 <= axis < first.dim() and 0 < step < math.inf and math.isfinite(t0)):
+            raise bad(f"'time' needs an axis of the {list(first.shape)} input and a positive finite step_s")
+        time = {"axis": axis, "step_s": step, "t0": t0}
+    meta = {"kind": "ref", "ref": ref, "name": str(got.get("name") or ref)[:120], "info": info}
+    return x, meta, {"raw": raw, "steps": steps, "blocks": blocks, "time": time}
+
+
+def _check_raw(raw: Any, bad: Callable[[str], ValueError]) -> dict[str, Any]:
+    try:
+        fs, t0, chans = float(raw["fs"]), float(raw.get("t0", 0.0)), list(raw["channels"])
+    except (TypeError, KeyError, ValueError, AttributeError):
+        raise bad("'raw' must be {'fs', 't0', 'channels': [{'name', 'unit', 'values'}]}") from None
+    if not (0 < fs < math.inf and math.isfinite(t0)) or not chans:
+        raise bad("'raw' needs a positive finite fs and at least one channel")
+    out = []
+    for i, c in enumerate(chans):
+        try:
+            v = np.asarray(c["values"], dtype=np.float32)
+        except (TypeError, KeyError, ValueError, AttributeError):
+            raise bad(f"raw channel {i} needs 'values', a 1-D array of numbers") from None
+        if v.ndim != 1 or not v.size:
+            raise bad(f"raw channel {i} values must be 1-D and non-empty, got shape {list(v.shape)}")
+        unit = c.get("unit")
+        name = str(c.get("name") or f"c{i}")
+        out.append({"name": name, "unit": None if unit is None else str(unit), "values": v})
+    return {"fs": fs, "t0": t0, "time_label": str(raw.get("time_label") or "s"), "channels": out}
+
+
+def _check_block(b: Any, n: int, bad: Callable[[str], ValueError]) -> dict[str, Any]:
+    try:
+        start, stop, name = int(b["start"]), int(b["stop"]), str(b["name"])
+    except (TypeError, KeyError, ValueError, AttributeError):
+        raise bad("each block must be {'name': str, 'start': int, 'stop': int}") from None
+    if not 0 <= start < stop <= n:
+        raise bad(f"block {name!r} spans {start}:{stop}, outside the input's {n} columns")
+    labels, unit = b.get("labels"), b.get("unit")
+    if labels is not None and len(labels) != stop - start:
+        raise bad(f"block {name!r} has {len(labels)} labels for {stop - start} columns")
+    labels = None if labels is None else [str(s) for s in labels]
+    unit = None if unit is None else str(unit)
+    return {"name": name, "start": start, "stop": stop, "labels": labels, "unit": unit}
 
 
 def _quiet(_frac: float, _msg: str) -> None:
@@ -1035,6 +1212,115 @@ def _to_device(inputs: Any, device: str) -> Any:
     return inputs
 
 
+RAW = "input_raw"
+WEB_IMAGES = {"JPEG": "jpg", "PNG": "png", "GIF": "gif", "WEBP": "webp", "BMP": "bmp"}
+
+
+def _steps(loaded: LoadedModel, sample_meta: dict[str, Any]) -> list[str] | None:
+    """The preprocessing between the sample and the model input, in words."""
+    kind = sample_meta["kind"]
+    if kind == "image":
+        return loaded.steps
+    if kind == "text":
+        return [f"Tokenize with {type(loaded.tokenizer).__name__} → token ids"]
+    if kind == "tensor":
+        return ["None: the uploaded tensor is the model input (integer arrays stay int64, the rest float32)"]
+    return [f"None: a random input, {sample_meta['name']} (seed 0)"]
+
+
+def _save_raw(path: Path | dict[str, Any] | None, run_dir: Path) -> dict[str, Any] | None:
+    """Copy the uploaded image as it was (the raw input), or a PNG of it when browsers cannot show it; a
+    signal (a checked ``load_sample`` raw) goes to input_raw.npz, a float32 array per channel (c0, c1, …)."""
+    if path is None:
+        return None
+    if isinstance(path, dict):  # not optional: the Input view of a ref run is built on it
+        chans = path["channels"]
+        np.savez(run_dir / f"{RAW}.npz", **{f"c{i}": c["values"] for i, c in enumerate(chans)})
+        return {"kind": "signal", "file": f"{RAW}.npz", "fs": path["fs"], "t0": path["t0"],
+                "time_label": path["time_label"],
+                "channels": [{"name": c["name"], "unit": c["unit"], "length": len(c["values"])}
+                             for c in chans]}  # fmt: skip
+    try:  # optional artifact, like the preview
+        from PIL import Image
+
+        with Image.open(path) as im:
+            fmt, (w, h) = im.format or "?", im.size
+            if fmt in WEB_IMAGES:
+                name = f"{RAW}.{WEB_IMAGES[fmt]}"
+                shutil.copyfile(path, run_dir / name)
+            else:  # TIFF, MPO, ...: shown as PNG, the pixels unchanged
+                name = f"{RAW}.png"
+                im.save(run_dir / name)
+        return {"file": name, "width": w, "height": h, "format": fmt, "bytes": path.stat().st_size}
+    except Exception:  # noqa: BLE001 - a raw copy is optional; the capture already succeeded
+        return None
+
+
+def _stats(v: np.ndarray) -> dict[str, float | None]:
+    f = v[np.isfinite(v)].astype(np.float64)
+    return {k: (float(fn(f)) if f.size else None) for k, fn in
+            (("mean", np.mean), ("std", np.std), ("min", np.min), ("max", np.max))}  # fmt: skip
+
+
+def input_summary(x: np.ndarray, blocks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Per-channel stats of the model input (sample 0; axis 1 of an image-like input, one named row per block
+    of a (1, T, C) input's last axis, else one row)."""
+    if blocks and x.ndim == 3:
+        return [{"channel": None, "name": b["name"], **_stats(x[0][:, b["start"] : b["stop"]])}
+                for b in blocks]  # fmt: skip
+    a = x[0] if x.ndim >= 3 else x
+    chans = [a[c] for c in range(min(a.shape[0], 64))] if x.ndim == 4 else [a]
+    return [{"channel": c if x.ndim == 4 else None, **_stats(v)} for c, v in enumerate(chans)]
+
+
+def _short(a: np.ndarray) -> list[float | None]:
+    """Floats at 5 significant digits (a small JSON reply); non-finite -> None."""
+    return [float(f"{v:.5g}") if math.isfinite(v) else None for v in a.tolist()]
+
+
+def _pool0(a: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """(min, max, mean, stride) of ``a`` pooled along axis 0 into <= n blocks of ``stride`` rows (the last
+    block may be shorter), NaN ignored (an all-NaN block gives NaN)."""
+    stride = max(1, math.ceil(len(a) / max(1, n)))
+    idx = np.arange(0, len(a), stride)
+    ok = np.isfinite(a)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.add.reduceat(np.where(ok, a, 0.0), idx, axis=0) / np.add.reduceat(ok, idx, axis=0)
+    nan = np.where(ok, a, np.nan)
+    return np.fmin.reduceat(nan, idx, axis=0), np.fmax.reduceat(nan, idx, axis=0), mean, stride
+
+
+def signal_view(run_dir: Path, raw: dict[str, Any], points: int) -> dict[str, Any]:
+    """The raw signal of a ref run: a min / max envelope and the mean per channel, pooled to <= ``points``."""
+    out: dict[str, Any] = {k: raw.get(k) for k in ("fs", "t0", "time_label")} | {"stride": 1, "channels": []}
+    with np.load(run_dir / Path(raw["file"]).name) as z:
+        for i, c in enumerate(raw["channels"]):
+            lo, hi, mean, stride = _pool0(np.asarray(z[f"c{i}"], dtype=np.float64), points)
+            out["stride"] = max(out["stride"], stride)
+            pooled = {"stride": stride, "min": _short(lo), "max": _short(hi), "mean": _short(mean)}
+            out["channels"].append({**c, **pooled})
+    return out
+
+
+MATRIX_COLS = 600
+
+
+def matrix_view(x: np.ndarray, blocks: list[dict[str, Any]] | None, time: dict[str, Any] | None
+                ) -> dict[str, Any]:  # fmt: skip
+    """A float (1, T, C) input as one (block columns × <= 600 time steps) matrix per block, time mean-pooled;
+    lo / hi are the block's unpooled range."""
+    a = x[0].astype(np.float64)
+    _, _, mean, stride = _pool0(a, MATRIX_COLS)
+    blocks = blocks or [{"name": "input", "start": 0, "stop": a.shape[1], "labels": None, "unit": None}]
+    out = []
+    for b in blocks:
+        s = _stats(a[:, b["start"] : b["stop"]])
+        rows = [_short(r) for r in mean[:, b["start"] : b["stop"]].T]
+        out.append({"name": b["name"], "unit": b.get("unit"), "labels": b.get("labels"), "start": b["start"],
+                    "lo": s["min"], "hi": s["max"], "values": rows})  # fmt: skip
+    return {"time": time, "steps": a.shape[0], "stride": stride, "blocks": out}
+
+
 def _save_preview(inputs: Any, norm: Any, run_dir: Path) -> dict[str, int] | None:
     """Write input_preview.png (<= 224 px) for image-like inputs; returns its size or None."""
     try:  # optional artifact: a failure only disables the overlay, never the capture
@@ -1058,8 +1344,10 @@ def _shape(inputs: Any) -> list[int] | None:
     return list(x.shape) if torch.is_tensor(x) else None
 
 
-def _top_k(loaded: LoadedModel, inputs: Any, k: int = 5) -> tuple[list[dict[str, Any]], str | None]:
-    """(top-k, None), or ([], why) when the output gives no logits: the run is kept either way."""
+def _top_k(loaded: LoadedModel, inputs: Any, k: int = 5
+           ) -> tuple[list[dict[str, Any]], str | None, np.ndarray | None]:  # fmt: skip
+    """(top-k, None, the whole output vector), or ([], why, None) when the output gives no logits: the run is
+    kept either way."""
     try:
         with torch.no_grad():
             args = inputs if isinstance(inputs, (tuple, list)) else (inputs,)
@@ -1067,8 +1355,81 @@ def _top_k(loaded: LoadedModel, inputs: Any, k: int = 5) -> tuple[list[dict[str,
     except torch.cuda.OutOfMemoryError:
         raise
     except Exception as e:  # noqa: BLE001 - exotic outputs: skip the summary, keep the run
-        return [], describe(e)[1]
-    return _top_of(logits, loaded.categories, k), None
+        return [], describe(e)[1], None
+    vec = logits.cpu().numpy()
+    if loaded.output_kind == "values":  # scores / regression: a softmax over them means nothing
+        cats = loaded.categories
+        idx = logits.nan_to_num(float("-inf")).topk(min(k, logits.numel())).indices
+        rows = [{"index": int(i), "prob": None, "logit": _fin(logits[i]),
+                 "label": cats[int(i)] if cats and int(i) < len(cats) else None} for i in idx]  # fmt: skip
+        return rows, None, vec
+    return _top_of(logits, loaded.categories, k), None, vec
+
+
+OUTPUT, OUTPUT_MAX = "output.npy", 4096
+
+
+def output_view(v: np.ndarray, cats: Sequence[str] | None) -> dict[str, Any]:
+    """``{n, stride, values, labels}``: every output value (5 significant digits, non-finite -> None) and its
+    category; above 4096 elements the max of each block of ``stride`` values and no labels (a vocabulary)."""
+    v = np.asarray(v, dtype=np.float64).reshape(-1)
+    if v.size <= OUTPUT_MAX:
+        labels = [str(cats[i]) if i < len(cats) else None for i in range(v.size)] if cats else None
+        return {"n": int(v.size), "stride": 1, "values": _short(v), "labels": labels}
+    _, hi, _, stride = _pool0(v, OUTPUT_MAX)
+    return {"n": int(v.size), "stride": stride, "values": _short(hi), "labels": None}
+
+
+WINDOW_KINDS = ("target", "context", "horizon")
+
+
+def check_windows(got: Any, shape: Sequence[int] | None, layout: dict[str, Any]) -> list[dict[str, Any]]:
+    """``target_windows(index)``'s return checked against the run's input: ``[{label, start, stop, blocks,
+    kind}]`` with int bounds clipped to [0, T) of the time axis (meta.input.time's; else ``time_axis`` of a
+    3-D input, else the longer non-batch axis; windows left empty are dropped) and ``blocks`` None or names of
+    the input's blocks (``series_blocks``: meta.input.blocks, else one per raw channel, else ``input``).
+    ValueError: why not."""
+    if not isinstance(got, (list, tuple)):
+        raise ValueError(f"target_windows must return a list of dicts, got {type(got).__name__}")
+    if not got:
+        return []
+    if not shape or len(shape) < 2:
+        raise ValueError(f"input windows need an input with a time axis; this input is {shape}")
+    t = layout.get("time")
+    if t and 0 < t.get("axis", 0) < len(shape):
+        axis = int(t["axis"])
+    else:
+        axis = time_axis(shape, layout) if len(shape) == 3 else int(np.argmax(shape[1:])) + 1
+    steps = int(shape[axis])
+    if len(shape) == 3 and axis in (1, 2):
+        names = [b["name"] for b in series_blocks(layout, axis, int(shape[3 - axis]))]
+    else:
+        names = [b["name"] for b in layout.get("blocks") or []]
+    out = []
+    for i, w in enumerate(got):
+        if not isinstance(w, dict):
+            raise ValueError(f"target_windows: window {i} is {type(w).__name__}, not a dict")
+        start, stop, kind, blocks = w.get("start"), w.get("stop"), w.get("kind"), w.get("blocks")
+        whole = lambda v: isinstance(v, (int, np.integer)) and not isinstance(v, bool)  # noqa: E731
+        if not (whole(start) and whole(stop)):
+            raise ValueError(f"target_windows: window {i} needs int start and stop, got {start!r}, {stop!r}")
+        if kind not in WINDOW_KINDS:
+            raise ValueError(f"target_windows: window {i} has kind {kind!r}; use one of "
+                             f"{', '.join(WINDOW_KINDS)}")  # fmt: skip
+        if blocks is not None:
+            if not isinstance(blocks, (list, tuple)) or not all(isinstance(b, str) for b in blocks):
+                raise ValueError(f"target_windows: window {i} blocks must be a list of block names or None")
+            if unknown := [b for b in blocks if b not in names]:
+                known = ", ".join(repr(n) for n in names) or "none"
+                raise ValueError(f"target_windows: window {i} names unknown block {unknown[0]!r}; the "
+                                 f"input's blocks are {known}")  # fmt: skip
+            blocks = list(dict.fromkeys(blocks))
+        a, b = max(0, int(cast(int, start))), min(steps, int(cast(int, stop)))
+        if a < b:
+            label = w.get("label")
+            label = str(label)[:120] if label else f"{kind} {a}–{b - 1}"
+            out.append({"label": label, "start": a, "stop": b, "blocks": blocks, "kind": kind})
+    return out
 
 
 def _fin(x: Any) -> float | None:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fileName, resolveCssVars } from "./exportPng";
+import { axisGutters, fileName, resolveCssVars } from "./exportPng";
 
 describe("resolveCssVars", () => {
   const look = (n: string) => ({ "--ink": "#111111", "--panel": " #fafaf8 " } as Record<string, string>)[n] ?? "";
@@ -25,5 +25,14 @@ describe("fileName", () => {
   it("drops null, undefined and empty parts", () => {
     expect(fileName(["run_0001", null, "", undefined, "c", 3, "dots"], "png")).toBe("run_0001_c_3_dots.png");
     expect(fileName(["a/b", "[:]"], "png")).toBe("a-b.png");
+  });
+});
+
+describe("axisGutters", () => {
+  it("sizes the y gutter by the widest end value and the x row fixed; none without axes", () => {
+    expect(axisGutters()).toEqual({ left: 0, top: 0, bottom: 0 });
+    expect(axisGutters({ x: { from: "0", to: "223", label: "col" } })).toEqual({ left: 0, top: 0, bottom: 16 });
+    expect(axisGutters({ y: { from: "12544", to: "0", label: "√count" } })).toEqual({ left: 8 + 30, top: 14, bottom: 0 });
+    expect(axisGutters({ y: { from: "", to: "", label: "q" } }).left).toBe(14);   // the label is on the top row now
   });
 });
